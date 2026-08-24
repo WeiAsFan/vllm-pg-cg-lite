@@ -1,0 +1,3 @@
+4b56b37fe4c001b3f7d5b6188cad58033c7f4228246881d91661f72a800690d7  0001-fix-backport-model-runner-v2-cudagraph-metrics-propa.patch
+5617d1f04a47724e3bd7577f357bfbc514be7e058f3d80b5f4acb68a8015f456  0002-feat-emit-machine-readable-cudagraph-profile-metrics.patch
+3248a491d97f77b4c19f14d403d7ee1778a97eaad332705619d35c59062a74ec  0003-feat-add-lightweight-profile-guided-cudagraph-planne.patch
