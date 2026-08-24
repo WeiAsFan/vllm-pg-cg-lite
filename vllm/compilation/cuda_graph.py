@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import json
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -28,6 +29,8 @@ from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
 
+PROFILE_PREFIX = "PG_CG_PROFILE="
+
 
 @dataclasses.dataclass(frozen=True)
 class CUDAGraphStat:
@@ -53,7 +56,7 @@ class CUDAGraphLogging:
     ) -> None:
         self.reset()
         self.cg_mode = str(cg_mode)
-        self.cg_capture_sizes = str(cg_capture_sizes or [])
+        self.cg_capture_sizes = list(cg_capture_sizes or [])
 
         self.settings_header = (
             "**CUDAGraph Config Settings:**\n\n"
@@ -117,10 +120,43 @@ class CUDAGraphLogging:
             + "\n"
         )
 
+    def generate_profile_line(self) -> str:
+        stats_counts = Counter(self.stats)
+        ordered = sorted(
+            stats_counts.items(),
+            key=lambda item: (
+                item[0].runtime_mode,
+                item[0].num_unpadded_tokens,
+                item[0].num_padded_tokens,
+            ),
+        )
+        bins = [
+            {
+                "num_unpadded_tokens": stat.num_unpadded_tokens,
+                "num_padded_tokens": stat.num_padded_tokens,
+                "num_paddings": stat.num_paddings,
+                "runtime_mode": stat.runtime_mode,
+                "count": count,
+            }
+            for stat, count in ordered
+        ]
+        payload = {
+            "schema_version": 1,
+            "cudagraph_mode": self.cg_mode,
+            "capture_sizes": self.cg_capture_sizes,
+            "bins": bins,
+        }
+        return PROFILE_PREFIX + json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
     def log(self, log_fn: Callable[..., Any] = logger.info) -> None:
         if not self.stats:
             return
         log_fn(self.generate_metric_table())
+        log_fn(self.generate_profile_line())
         self.reset()
 
 
