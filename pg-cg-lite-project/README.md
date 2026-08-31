@@ -135,7 +135,7 @@ v0.27.1 的 GPU Model Runner V2 没有完整传播 `CUDAGraphStat`。项目需�
 - `num_paddings`；
 - `runtime_mode`。
 
-这部分来源于 vLLM issue #52728 和 PR #52750，对应补丁必须保留来源说明，不计入 PG-CG Lite 的原创实现。
+这部分来源于 vLLM issue #52728 和 PR #52750，对应补丁必须保留来源说明，不计入 PG-CG Lite 的原创实现。截至 2026-08-31，该 PR 仍为 Open，当前 head 为 [`3eb313e5`](https://github.com/vllm-project/vllm/commit/3eb313e5abc9a29836db43956692345733277826)；本项目提交 `7c844fb22` 仅把其中 `model_runner.py` 的 16 行生产逻辑按 v0.27.1 的代码位置做同语义回移，不代表该修复已经被上游接受。
 
 只做一个冒烟门禁：服务带 `--cudagraph-metrics` 运行 20 条以上请求后，日志必须出现非空 `CUDAGraph Stats` 和 `PG_CG_PROFILE=`。如果没有，停止实验并修复链路，不允许用手工构造数据替代。
 

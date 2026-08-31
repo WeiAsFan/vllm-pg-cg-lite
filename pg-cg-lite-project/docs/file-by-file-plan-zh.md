@@ -64,7 +64,7 @@
 
 ### 来源边界
 
-该改动是 vLLM [PR #52750](https://github.com/vllm-project/vllm/pull/52750) 的最小回移，对应 issue #52728。提交说明必须保留来源。
+该改动是 vLLM [PR #52750](https://github.com/vllm-project/vllm/pull/52750) 的最小回移，对应 issue #52728。提交说明必须保留来源。截至 2026-08-31，该 PR 仍未合并，head 为 [`3eb313e5`](https://github.com/vllm-project/vllm/commit/3eb313e5abc9a29836db43956692345733277826)；本项目 `7c844fb22` 与其 16 行生产改动语义一致，仅因回移到 v0.27.1 而处在不同代码行位置。
 
 ### 完成证据
 
