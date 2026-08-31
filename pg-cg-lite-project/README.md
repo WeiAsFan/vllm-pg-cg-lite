@@ -2,15 +2,19 @@
 
 | 文档属性 | 值 |
 |---|---|
-| 状态 | 核心规划器已切换为默认集合子集剪枝；Linux/A6000 验证待执行 |
-| 版本 | 2.1 Lite |
-| 日期 | 2026-08-31 |
+| 状态 | 算法与正式协议已加固；Linux/A6000 门禁和 A/B/C 待执行 |
+| 版本 | 2.2 Lite |
+| 日期 | 2026-09-01 |
 | 目标框架 | vLLM |
 | 开发基线 | `v0.27.1` / `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` |
 | 验证硬件 | 单卡 NVIDIA RTX A6000 48 GiB，`sm_86` |
 | 服务器现状 | NVIDIA 驱动 `535.230.02`；`nvidia-smi` 显示 `CUDA Version: 12.2`（不是 Toolkit 版本） |
 | 建议模型 | `Qwen/Qwen2.5-7B-Instruct` revision `a09a35458c702b33eeacc393d103063234e8bc28`，BF16 |
-| 项目定位 | 面试作品型、小规模推理框架二次开发 |
+| 项目定位 | 带小型离线算法的推理部署与性能工程项目 |
+
+项目共同语言见 [根目录 `CONTEXT.md`](../CONTEXT.md)；从空目录开始复现请只使用
+[A6000 完整操作手册](docs/a6000-runbook-zh.md)；旧分支结果为何不能作为正式结论，见
+[2026-08-28 历史预实验审计](docs/legacy-results-20260828-zh.md)。本地 Windows 工作站只用于编辑、文档和 Git，所有测试与实验都在 SSH 登录的远端 Linux GPU 服务器执行。
 
 ## 1. 结论与项目边界
 
@@ -77,10 +81,11 @@ PG-CG Lite 不尝试求解所有推理性能问题，只回答：
 相同 workload 下，候选配置相对默认配置：
 
 - 请求吞吐中位数下降不超过 5%；
-- median TPOT 上升不超过 5%；
-- 20 条固定请求的 `generated_texts` 完全一致。
+- median TPOT 上升不超过 5%。
 
 三次重复只用于降低偶然波动，不做统计显著性或生产 SLA 推断。
+
+功能等价性是独立前置门禁：在 `VLLM_BATCH_INVARIANT=1` 的确定性模式下，A/B/C 的 20 条固定请求必须无错误、token 数符合协议且 `generated_texts` 完全一致。真实性能模式显式取消该变量，只检查运行有效性，不要求不同轮次生成文本逐字相同。
 
 ### 3.3 画像增益假设
 
@@ -88,7 +93,7 @@ PG-CG Lite 不尝试求解所有推理性能问题，只回答：
 
 ### 3.4 最低可交付结果
 
-项目不以“必须提速”为完成条件。下面三种结果都可以诚实讲解：
+项目不以“必须提速”为完成条件。下面这些结果都可以诚实讲解：
 
 | 结果 | 可得结论 |
 |---|---|
@@ -121,7 +126,7 @@ flowchart LR
     D --> E[最多 8 个 capture sizes]
     E --> F[生成等秩 B 与画像 C 配置]
     F --> G[A/B/C 各运行 3 次]
-    G --> H[比较启动、延迟、吞吐和正确性]
+    G --> H[分离验证功能等价与真实性能]
 ```
 
 在线服务只做低频日志输出。选择算法、JSON 解析和配置生成都在离线脚本中完成。
@@ -394,19 +399,20 @@ Linux R535 满足 CUDA 12.x 小版本兼容的最低版本，但 PTX/JIT 仍可�
 
 不要在看到性能结果后改变 B 的规则，也不要加入 eager 或关闭代码路径作为正式对照。`K ∈ {4,8,16}` 只做离线 padding 敏感性分析，正式 GPU 主实验固定 `K=8`。
 
-### 11.4 正确性冒烟
+### 11.4 功能等价性门禁
 
-A/B/C 分别运行相同的 20 个随机请求，使用 `--seed 2026 --save-result --save-detailed`。比较结果 JSON 中的：
+A/B/C 都在 `VLLM_BATCH_INVARIANT=1` 下运行相同的 20 个随机请求，使用 `--seed 2026 --temperature 0 --ignore-eos --save-result --save-detailed`。比较结果 JSON 中的：
 
 - `completed`；
 - `errors`；
+- `input_lens` 与 `output_lens`；
 - `generated_texts`。
 
-要求三个组均完成 20 条请求、无错误，且 `generated_texts` 列表完全一致。
+要求三个组均完成 20 条请求、无错误、输入/输出 token 数符合 512/64，且 `generated_texts` 列表完全一致。该模式只用于功能门禁，不产生性能结论。
 
 ### 11.5 性能实验
 
-每组重启服务器 3 次，顺序为 `A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3`。每次启动后执行相同命令：
+先显式取消 `VLLM_BATCH_INVARIANT`，分别对 A/B/C 做一次 20 请求的性能模式预热；预热结果不进入正式表。之后每组重启服务器 3 次，顺序为 `A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3`。每次启动后执行相同命令：
 
 ```bash
 vllm bench serve \
@@ -419,11 +425,12 @@ vllm bench serve \
   --num-prompts 500 \
   --request-rate inf \
   --max-concurrency 16 \
-  --metric-percentiles 95 \
+  --metric-percentiles 95,99 \
   --seed 2026 \
   --temperature 0 \
   --ignore-eos \
   --save-result \
+  --save-detailed \
   --result-dir logs \
   --result-filename A1.json
 ```
@@ -436,11 +443,11 @@ vllm bench serve \
 4. `Graph capturing finished in X secs` 的 X；
 5. `took Y GiB` 的 Y；
 6. request throughput；
-7. median/p95 TTFT；
-8. median/p95 TPOT；
-9. 运行是否出现错误。
+7. median/P95/P99 TTFT；
+8. median/P95/P99 TPOT 与 ITL；
+9. 请求是否全部完成、错误列表是否为空、输入/输出 token 数是否符合 512/128。
 
-各组之间等待 GPU 温度回落到接近的空闲水平即可，不做时钟锁定、NVML 持续采集或长稳测试。主实验结束后，再用并发 4、每组 200 条请求各运行一次轻量 workload-shift 检查；shift 不进入主结论。
+性能轮不比较跨轮生成文本。各组之间等待 GPU 温度回落到接近的空闲水平即可，不做时钟锁定、NVML 持续采集或长稳测试。主实验结束后，再用并发 4、每组 200 条请求各运行一次轻量 workload-shift 检查；shift 不进入主结论。time-to-ready 的口径是共享依赖与编译缓存已预热后的服务启动，不是首次部署冷启动。
 
 ### 11.6 结果计算
 
@@ -463,9 +470,11 @@ vllm bench serve \
 | Graph capture 时间 / s |  |  |  |  |  | 越低越好 |
 | Graph capture 显存 / GiB |  |  |  |  |  | 越低越好 |
 | Request throughput / req/s |  |  |  |  |  | C 相对 A 下降不超过 5% |
-| Median/P95 TTFT / ms |  |  |  |  |  | 越低越好 |
-| Median/P95 TPOT / ms |  |  |  |  |  | median 相对 A 上升不超过 5% |
-| 20 条输出一致性 |  |  |  |  |  | 必须完全一致 |
+| Median/P95/P99 TTFT / ms |  |  |  |  |  | P99 为尾部诊断项 |
+| Median/P95/P99 TPOT / ms |  |  |  |  |  | median 相对 A 上升不超过 5% |
+| Median/P95/P99 ITL / ms |  |  |  |  |  | P99 为尾部诊断项 |
+| 确定性模式 20 条输出一致性 |  |  |  |  |  | 必须完全一致 |
+| 真实性能模式运行有效性 |  |  |  |  |  | 九轮必须全部有效 |
 
 另外附一张图即可：横轴为“默认 A、等秩 B、PG-CG C”，纵轴并列展示 capture 时间和 capture 显存。其他指标放在表中，避免图表过多。
 
@@ -495,6 +504,8 @@ vllm bench serve \
 | 日志前缀包含时间和 engine 信息 | 解析器搜索行内 `PG_CG_PROFILE=` 子串 |
 | R535 与 cu129 的 runtime/JIT 路径不兼容 | 三层门禁失败即停止，升级到 `575.57.08` 或更新驱动后重试 |
 | 多次运行温度波动 | A/B/C 使用交叉顺序并报告全部 3 个原始值 |
+| 真实并发模式的输出受批处理影响 | 正确性使用 batch-invariant 模式逐字比较；性能模式关闭该变量且不比较文本 |
+| 归档混入模型或编译缓存 | 只打包日志证据，排除缓存与二进制，并生成文件级及归档级 SHA256 |
 
 ## 15. 完成定义
 
@@ -505,10 +516,12 @@ vllm bench serve \
 - 离线脚本能从真实日志生成不超过 8 个 capture sizes；
 - 动态规划在随机小输入上与穷举结果一致；
 - 输出可直接用于原生 `--compilation-config`；
-- 20 条固定请求输出一致；
+- batch-invariant 模式下 20 条固定请求输出一致；
+- 真实性能模式下九轮请求全部完成、无错误且 token 数符合协议；
 - 默认全集、同预算等秩子集和 PG 子集各完成 3 次同 workload 实验；
 - 完成一次并发 4 的轻量 workload-shift 检查；
 - 完成一张结果表和一张 capture 开销对比图；
+- 证据能追溯到提交、环境、模型 revision、实际配置和原始输出，归档不含缓存；
 - 报告没有夸大结论，并注明遥测依赖补丁来源。
 
 ## 16. 主要来源

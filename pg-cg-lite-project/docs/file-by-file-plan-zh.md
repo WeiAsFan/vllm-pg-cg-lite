@@ -4,13 +4,13 @@
 
 **目标：** 在 vLLM v0.27.1 中补齐 CUDA Graph 真实运行画像，增加一个离线动态规划器，从默认 capture-size 集合中选择最多 8 个尺寸，并在单卡 A6000 上验证初始化开销与稳态性能。
 
-**当前状态：** 核心规划器已改为默认集合子集剪枝；按照执行环境约束，本机不运行测试，planner、日志链路、GPU 门禁和性能实验统一留到 SSH 登录的 Linux 服务器执行。
+**当前状态：** 核心规划器已改为默认集合子集剪枝，A/B/C 正式协议与证据归档规则已经冻结；按照执行环境约束，本机不运行测试，planner、日志链路、GPU 门禁和性能实验统一留到 SSH 登录的 Linux 服务器执行。
 
 **源码基线：**
 
 - 标签：`v0.27.1`
 - commit：`6e448d0ea9bf3d88d898b65449ca6dc2aec170ac`
-- 开发分支：`feature/pg-cg-lite`
+- 开发分支：`fix/pg-cg-lite-hardening`
 
 ## 2. 规模约束与实际结果
 
@@ -208,6 +208,9 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 [A6000 完整操作手册](a6000-runbook-zh.md)
 
+`feature/pg-cg-lite` 上的 2026-08-28 运行结果只属于历史预实验，不能替代本任务；问题与可用信号见
+[历史预实验结果审计](legacy-results-20260828-zh.md)。
+
 固定条件：
 
 | 参数 | 值 |
@@ -223,6 +226,8 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 | 并发 | 16 |
 | input/output | 512/128 |
 | 采样 | temperature 0，ignore EOS |
+| 功能等价模式 | `VLLM_BATCH_INVARIANT=1`，20 条输出逐字比较 |
+| 性能模式 | 显式取消 batch invariant，P95/P99，全量 token/错误校验 |
 
 ### 必须依次通过的门禁
 
@@ -232,8 +237,8 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 4. vLLM CUDA Graph 服务冒烟；
 5. 非空 `PG_CG_PROFILE=`；
 6. 计划默认尺寸数大于 8、候选不超过 8；
-7. 20/20 输出完全一致；
-8. A/B/C 各 3 次都完成且无失败请求。
+7. batch-invariant 模式下 20/20 输出完全一致；
+8. 性能模式下 A/B/C 各 3 次都完成、无错误且 token 数符合协议。
 
 ### R535 兼容策略
 
@@ -260,8 +265,9 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 - `Graph capturing finished` 时间；
 - CUDA Graph capture 显存；
 - request throughput；
-- median/p95 TTFT 与 TPOT；
-- 20 条输出一致性。
+- median/P95/P99 TTFT、TPOT 与 ITL；
+- 确定性模式的 20 条输出一致性；
+- 真实性能模式的九轮运行有效性。
 
 ## 8. 最终源码验证清单
 
@@ -303,10 +309,12 @@ git status --short
 - 画像日志来自真实 A6000 请求，不是手工样例；
 - 规划器输出不超过 8 个 sizes，并保留默认最大上界；
 - 默认数量确实大于 8，形成清晰结构对比；
-- 20/20 输出一致；
+- batch-invariant 模式下 20/20 输出一致；
+- 性能模式下九轮及 shift 请求全部完成、无错误且 token 数符合协议；
 - A/B/C 各完成 3 次，并完成一次轻量 shift 检查；
 - 原始日志、9 个主实验 benchmark JSON、3 个 shift JSON 和 `plan.json` 全部保留；
 - 自动生成 `summary.json`、`results.md` 和 1 张对比图；
+- 证据归档包含文件级和归档级 SHA256，且排除模型、环境与编译缓存；
 - 报告明确上游补丁来源和单机单 workload 的结论边界。
 
 在服务器不可访问的当前阶段，代码实现已完成，但 GPU 实验尚未完成；不能提前填写或虚构性能数字。
