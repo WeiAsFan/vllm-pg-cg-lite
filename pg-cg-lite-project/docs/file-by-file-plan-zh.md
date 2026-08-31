@@ -17,12 +17,12 @@
 | 项目 | 约束 | 实际 |
 |---|---:|---:|
 | 代码与测试文件 | 不超过 5 个 | 5 个 |
-| 新增生产代码 | 约 150～250 行 | 约 228 行 |
-| 含测试总代码 | 约 300～450 行 | 约 412 行 |
+| 新增生产代码 | 不超过 300 行 | 约 292 行 |
+| 含测试总代码 | 不超过 550 行 | 约 537 行 |
 | 第三方运行依赖 | 不新增 | 0 个 |
 | 模型 | 1 个 | 1 个 |
 | 正式 workload | 1 个 | 1 个 |
-| A/B 组 | 2 个 | 2 个 |
+| A/B/C 组 | 3 个 | 3 个 |
 | 每组重复 | 3 次 | 服务器待执行 |
 
 明确不做：
@@ -181,7 +181,7 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 `tests/benchmarks/test_pg_cg_lite.py`
 
-### 15 个测试用例
+### 20 个测试用例
 
 1. 多日志周期合并，FULL/PIECEWISE 归一，NONE 单独计数；
 2. 默认 `[1,2,4,8]`、画像 `{1:5, 3:3, 8:2}`、`K=2` 得到合法子集 `(1,8)`，padding 为 15；
@@ -191,11 +191,12 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 6. 空、乱序、重复、非正默认集合以及超出最大覆盖的画像均报错；
 7. 空日志和混合不同 capture 配置报错；
 8. 计划字段、可应用配置和新 CLI 参数保持一致。
+9. 同预算等秩子集保持确定性、保留最大尺寸，并拒绝零预算。
 
 ### 服务器待验证门禁
 
 - 规划器不导入 torch，不增加运行依赖；
-- 在 Linux 项目环境运行全部 15 个 planner 测试；
+- 在 Linux 项目环境运行全部 20 个 planner 测试；
 - 在同一环境运行画像日志测试、Ruff、格式、编译和 diff 检查；
 - GPU 冒烟确认真实日志满足子集规划输入契约；
 - 子集修复提交：`5f4c5a241 refactor(pg-cg): 将 planner 约束为默认 capture-size 子集`。
@@ -226,12 +227,12 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 1. 普通 CUDA matmul；
 2. `torch.compile`/Triton JIT；
-3. 2+15 个聚焦测试和 Ruff；
+3. 2+20 个聚焦测试和 Ruff；
 4. vLLM CUDA Graph 服务冒烟；
 5. 非空 `PG_CG_PROFILE=`；
 6. 计划默认尺寸数大于 8、候选不超过 8；
 7. 20/20 输出完全一致；
-8. A/B 各 3 次都完成且无失败请求。
+8. A/B/C 各 3 次都完成且无失败请求。
 
 ### R535 兼容策略
 
@@ -241,21 +242,24 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 - 任何 PTX/JIT/driver 错误都停止；
 - 必要时升级到 `575.57.08` 或更新生产驱动后重试。
 
-### 正式 A/B
+### 正式 A/B/C
 
 - A：vLLM 默认 capture sizes；
-- B：同一画像生成的最多 8 个 sizes；
-- 次序：`A1 → B1 → A2 → B2 → A3 → B3`；
+- B：不读取画像的同预算等秩默认子集；
+- C：画像生成的默认集合最优子集；
+- 次序：`A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3`；
 - 每轮重启服务，等待 GPU 回到空闲温度；
 - 只报告 3 次原始值和中位数，不挑最好一次。
 
 ### 结果指标
 
 - capture-size 数量；
+- 默认、等秩与 PG 子集的预测 padding；
+- time-to-ready；
 - `Graph capturing finished` 时间；
 - CUDA Graph capture 显存；
 - request throughput；
-- median TPOT；
+- median/p95 TTFT 与 TPOT；
 - 20 条输出一致性。
 
 ## 8. 最终源码验证清单
@@ -299,8 +303,8 @@ git status --short
 - 规划器输出不超过 8 个 sizes，并保留默认最大上界；
 - 默认数量确实大于 8，形成清晰结构对比；
 - 20/20 输出一致；
-- A/B 各完成 3 次；
-- 原始日志、6 个 benchmark JSON、`plan.json` 全部保留；
+- A/B/C 各完成 3 次，并完成一次轻量 shift 检查；
+- 原始日志、9 个主实验 benchmark JSON、3 个 shift JSON 和 `plan.json` 全部保留；
 - 自动生成 `summary.json`、`results.md` 和 1 张对比图；
 - 报告明确上游补丁来源和单机单 workload 的结论边界。
 

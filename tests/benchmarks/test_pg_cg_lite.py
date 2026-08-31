@@ -14,6 +14,7 @@ from vllm.benchmarks.pg_cg_lite import (
     parse_profile_lines,
     predict_padding,
     select_capture_sizes,
+    select_uniform_rank_subset,
 )
 
 SIZES = [1, 2, 4, 8]
@@ -108,6 +109,21 @@ def test_budget_covering_all_used_default_sizes_keeps_them() -> None:
 
 
 @pytest.mark.parametrize(
+    ("size_count", "expected"),
+    [(1, (8,)), (2, (1, 8)), (3, (1, 4, 8)), (8, (1, 2, 4, 8))],
+)
+def test_uniform_rank_subset_is_deterministic_and_preserves_maximum(
+    size_count: int, expected: tuple[int, ...]
+) -> None:
+    assert select_uniform_rank_subset(SIZES, size_count) == expected
+
+
+def test_uniform_rank_subset_rejects_zero_budget() -> None:
+    with pytest.raises(ValueError, match="size_count"):
+        select_uniform_rank_subset(SIZES, 0)
+
+
+@pytest.mark.parametrize(
     "source_sizes",
     [[], [1, 4, 2, 8], [1, 2, 2, 8], [0, 1, 2, 8]],
 )
@@ -139,6 +155,15 @@ def test_build_plan_is_directly_applicable() -> None:
     assert plan["selection_policy"] == "default_capture_size_subset_dp"
     assert plan["max_capture_sizes"] == 2
     assert plan["source_capture_sizes"] == SIZES
+    assert plan["equal_budget_selection_policy"] == "uniform_rank_default_subset"
+    assert plan["equal_budget_capture_sizes"] == [1, 8]
+    assert (
+        plan["equal_budget_capture_size_count"]
+        == plan["selected_capture_size_count"]
+    )
+    assert plan["equal_budget_compilation_config"] == {
+        "cudagraph_capture_sizes": plan["equal_budget_capture_sizes"]
+    }
     assert plan["compilation_config"] == {
         "cudagraph_capture_sizes": plan["selected_capture_sizes"]
     }

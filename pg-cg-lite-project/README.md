@@ -25,16 +25,16 @@ PG-CG Lite 只做一个小点：
 | 项目 | 上限 |
 |---|---:|
 | 修改或新增的代码、测试文件 | 5 个 |
-| 新增生产代码 | 约 228 行 |
-| 包含测试的总代码 | 约 412 行 |
+| 新增生产代码 | 不超过 300 行；当前约 292 行 |
+| 包含测试的总代码 | 不超过 550 行；当前约 537 行 |
 | 正式实验模型 | 1 个 |
 | 正式实验工作负载 | 1 个 |
-| 正式对照组 | 2 个 |
+| 正式对照组 | 3 个 |
 | 每组重复次数 | 3 次 |
 | 正确性请求 | 20 条 |
-| 预计服务器实验时间 | 约 1～2 小时，不含首次模型下载和环境安装 |
+| 预计服务器实验时间 | 约 2～3 小时，不含首次模型下载和环境安装 |
 
-超过以上预算的功能不进入本项目。
+2.1 版为修复子集语义并增加同预算公平对照，将行数预算上调到上述范围；仍保持 5 个代码与测试文件，不再为实验框架扩文件。
 
 ### 1.2 明确不做
 
@@ -82,17 +82,22 @@ PG-CG Lite 不尝试求解所有推理性能问题，只回答：
 
 三次重复只用于降低偶然波动，不做统计显著性或生产 SLA 推断。
 
-### 3.3 最低可交付结果
+### 3.3 画像增益假设
+
+同样保留 8 个尺寸时，PG-CG Lite 组 C 的画像预测 padding 必须不高于不读取画像的等秩组 B。真实性能是否优于 B 由实验决定，不能由离线目标函数直接推出。
+
+### 3.4 最低可交付结果
 
 项目不以“必须提速”为完成条件。下面三种结果都可以诚实讲解：
 
 | 结果 | 可得结论 |
 |---|---|
-| capture 时间、显存下降，吞吐非劣 | 小创新有效 |
+| C 相对 A 的 capture 开销下降、稳态非劣，且优于 B | 画像指导的子集显示额外价值 |
+| B 与 C 接近，但都优于 A | 主要收益来自减少尺寸数量，画像选择暂无额外证据 |
 | capture 时间、显存下降，但吞吐下降超过 5% | 剪枝过强，展示启动成本与 padding 的权衡 |
 | capture 时间或显存没有明显下降 | 默认 capture 开销并非该环境的主要矛盾，保留负结果并分析 |
 
-无论性能如何，“默认尺寸数与 8 个尺寸”的结构差异以及离线 padding 估计都必须清晰可见。
+无论性能如何，三组的尺寸列表、离线 padding、启动成本和稳态指标都必须清晰可见。
 
 ## 4. 为什么选择 vLLM
 
@@ -114,9 +119,9 @@ flowchart LR
     B --> C[PG_CG_PROFILE JSON 日志行]
     C --> D[pg_cg_lite 离线脚本]
     D --> E[最多 8 个 capture sizes]
-    E --> F[复制到 compilation-config]
-    F --> G[默认组与 Lite 组各运行 3 次]
-    G --> H[比较捕获时间、显存、吞吐和 TPOT]
+    E --> F[生成等秩 B 与画像 C 配置]
+    F --> G[A/B/C 各运行 3 次]
+    G --> H[比较启动、延迟、吞吐和正确性]
 ```
 
 在线服务只做低频日志输出。选择算法、JSON 解析和配置生成都在离线脚本中完成。
@@ -234,24 +239,31 @@ cost(p,j)=\sum_{c_p<x_i\le c_j}w_i(c_j-x_i)
 ```json
 {
   "selection_policy": "default_capture_size_subset_dp",
+  "equal_budget_selection_policy": "uniform_rank_default_subset",
   "max_capture_sizes": 2,
   "source_capture_sizes": [1, 2, 4, 8],
-  "selected_capture_sizes": [1, 8],
-  "profile_event_count": 10,
+  "equal_budget_capture_sizes": [1, 8],
+  "selected_capture_sizes": [4, 8],
+  "profile_event_count": 6,
   "none_event_count": 0,
   "baseline_capture_size_count": 4,
+  "equal_budget_capture_size_count": 2,
   "selected_capture_size_count": 2,
-  "baseline_predicted_padding_tokens": 3,
-  "selected_predicted_padding_tokens": 15,
-  "compilation_config": {
+  "baseline_predicted_padding_tokens": 5,
+  "equal_budget_predicted_padding_tokens": 25,
+  "selected_predicted_padding_tokens": 5,
+  "equal_budget_compilation_config": {
     "cudagraph_capture_sizes": [1, 8]
+  },
+  "compilation_config": {
+    "cudagraph_capture_sizes": [4, 8]
   }
 }
 ```
 
-这是用于解释字段的最小示例；正式运行仍使用默认 `K=8`，尺寸必须由服务器画像生成。
+这是默认集合 `[1,2,4,8]`、画像 `{3:5,8:1}`、`K=2` 的字段示例；正式运行仍使用默认 `K=8`，尺寸必须由服务器画像生成。
 
-用户只需复制 `compilation_config` 到已有 `--compilation-config`，不需要新增 vLLM CLI。
+`equal_budget_compilation_config` 是不读取画像的同预算 B 组；`compilation_config` 是画像指导的 C 组。二者都可直接传给已有 `--compilation-config`，不需要新增 vLLM 服务端 CLI。
 
 ## 9. 文件级实现范围
 
@@ -366,28 +378,29 @@ Linux R535 满足 CUDA 12.x 小版本兼容的最低版本，但 PTX/JIT 仍可�
 | 采样 | `temperature=0`，`ignore_eos=true` |
 | PG-CG Lite K | 8 |
 
-### 11.3 两个实验组
+### 11.3 三个实验组
 
 | 组 | 配置 |
 |---|---|
 | A：默认组 | vLLM 默认 `cudagraph_capture_sizes` |
-| B：Lite 组 | 画像脚本输出的最多 8 个 sizes |
+| B：同预算规则组 | 不读取画像，按默认列表索引等间隔选择，尺寸数与 C 相同 |
+| C：PG-CG Lite 组 | 画像脚本输出的默认集合最优子集 |
 
-不要加入 eager、关闭代码路径或多个 K 值作为正式对照。需要调试时可以临时运行，但不进入主结果表。
+不要在看到性能结果后改变 B 的规则，也不要加入 eager 或关闭代码路径作为正式对照。`K ∈ {4,8,16}` 只做离线 padding 敏感性分析，正式 GPU 主实验固定 `K=8`。
 
 ### 11.4 正确性冒烟
 
-默认组和 Lite 组分别运行相同的 20 个随机请求，使用 `--seed 2026 --save-result --save-detailed`。比较结果 JSON 中的：
+A/B/C 分别运行相同的 20 个随机请求，使用 `--seed 2026 --save-result --save-detailed`。比较结果 JSON 中的：
 
 - `completed`；
 - `errors`；
 - `generated_texts`。
 
-要求两个组均完成 20 条请求、无错误，且 `generated_texts` 列表完全一致。
+要求三个组均完成 20 条请求、无错误，且 `generated_texts` 列表完全一致。
 
 ### 11.5 性能实验
 
-每组重启服务器 3 次，顺序为 `A1 → B1 → A2 → B2 → A3 → B3`。每次启动后执行相同命令：
+每组重启服务器 3 次，顺序为 `A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3`。每次启动后执行相同命令：
 
 ```bash
 vllm bench serve \
@@ -400,6 +413,7 @@ vllm bench serve \
   --num-prompts 500 \
   --request-rate inf \
   --max-concurrency 16 \
+  --metric-percentiles 95 \
   --seed 2026 \
   --temperature 0 \
   --ignore-eos \
@@ -410,37 +424,44 @@ vllm bench serve \
 
 每次记录：
 
-1. 配置中的 capture-size 数量；
-2. `Graph capturing finished in X secs` 的 X；
-3. `took Y GiB` 的 Y；
-4. benchmark 的 request throughput；
-5. benchmark 的 median TPOT；
-6. 运行是否出现错误。
+1. 配置中的默认、等秩和 PG capture-size 数量；
+2. 画像上的三组预测 padding；
+3. 服务启动到 health ready 的时间；
+4. `Graph capturing finished in X secs` 的 X；
+5. `took Y GiB` 的 Y；
+6. request throughput；
+7. median/p95 TTFT；
+8. median/p95 TPOT；
+9. 运行是否出现错误。
 
-两组之间等待 GPU 温度回落到接近的空闲水平即可，不做时钟锁定、NVML 持续采集或长稳测试。
+各组之间等待 GPU 温度回落到接近的空闲水平即可，不做时钟锁定、NVML 持续采集或长稳测试。主实验结束后，再用并发 4、每组 200 条请求各运行一次轻量 workload-shift 检查；shift 不进入主结论。
 
 ### 11.6 结果计算
 
 每个指标保留 3 个原始值，并报告中位数：
 
 \[
-\Delta_{time}=\frac{T_B-T_A}{T_A}\times100\%
+\Delta_{C/A}=\frac{T_C-T_A}{T_A}\times100\%,\qquad
+\Delta_{C/B}=\frac{T_C-T_B}{T_B}\times100\%
 \]
 
-显存、吞吐和 TPOT 使用相同相对变化公式。三次重复不足以支撑严格置信区间，所以只写“在三次重复中观察到”，不写“统计显著”。
+启动时间、显存、吞吐、TTFT 和 TPOT 使用相同相对变化公式。A 对 C 衡量整体方案，B 对 C 才衡量画像选择的额外价值。三次重复不足以支撑严格置信区间，所以只写“在三次重复中观察到”，不写“统计显著”。
 
 ## 12. 最终结果表模板
 
-| 指标 | 默认组 A，中位数 | Lite 组 B，中位数 | 相对变化 | 判定 |
-|---|---:|---:|---:|---|
-| capture-size 数量 |  |  |  | B ≤ 8 |
-| Graph capture 时间 / s |  |  |  | 越低越好 |
-| Graph capture 显存 / GiB |  |  |  | 越低越好 |
-| Request throughput / req/s |  |  |  | 下降不超过 5% |
-| Median TPOT / ms |  |  |  | 上升不超过 5% |
-| 20 条输出一致性 |  |  |  | 必须完全一致 |
+| 指标 | 默认 A | 等秩 B | PG-CG C | C 相对 A | C 相对 B | 判定 |
+|---|---:|---:|---:|---:|---:|---|
+| capture-size 数量 |  |  |  |  |  | B 与 C 同预算 |
+| 画像预测 padding / token |  |  |  |  |  | `A <= C <= B` |
+| Time-to-ready / s |  |  |  |  |  | 越低越好 |
+| Graph capture 时间 / s |  |  |  |  |  | 越低越好 |
+| Graph capture 显存 / GiB |  |  |  |  |  | 越低越好 |
+| Request throughput / req/s |  |  |  |  |  | C 相对 A 下降不超过 5% |
+| Median/P95 TTFT / ms |  |  |  |  |  | 越低越好 |
+| Median/P95 TPOT / ms |  |  |  |  |  | median 相对 A 上升不超过 5% |
+| 20 条输出一致性 |  |  |  |  |  | 必须完全一致 |
 
-另外附一张图即可：横轴为“默认、PG-CG Lite”，纵轴并列展示 capture 时间和 capture 显存。吞吐与 TPOT 放在表中，避免图表过多。
+另外附一张图即可：横轴为“默认 A、等秩 B、PG-CG C”，纵轴并列展示 capture 时间和 capture 显存。其他指标放在表中，避免图表过多。
 
 ## 13. 预期面试叙事
 
@@ -449,8 +470,8 @@ vllm bench serve \
 1. vLLM 默认会捕获一组静态 CUDA Graph sizes，但默认集合不知道具体业务分布。
 2. 捕获尺寸多会增加启动时间和 graph memory，尺寸少会增加 padding。
 3. 我补齐了 Model Runner V2 的指标链路，并让现有日志额外输出机器可读的尺寸直方图。
-4. 我用一个 O((Kn^2)) 的离线动态规划，在保留原最大上界的条件下选择 8 个尺寸，使画像上的预测 padding 最小。
-5. 我在 A6000 上用同一模型、同一 workload 对比默认配置和 Lite 配置，主要观察 capture 时间、显存及吞吐非劣。
+4. 我用 `O(Km² log n)` 的离线动态规划，只从默认集合中选择最多 8 个尺寸，在保留原最大上界的条件下最小化画像预测 padding。
+5. 我在 A6000 上比较默认全集、同预算等秩子集和画像子集；A 对 C 衡量整体方案，B 对 C 衡量画像选择的额外价值。
 6. 这个方案只对画像代表的 workload 负责；流量变化后应重新画像，而不是在线热切换。
 
 面试时应明确：配置中有 8 个 capture sizes，不代表底层一定只创建 8 张 CUDA Graph，因为不同运行模式或 descriptor 可能产生多张图。
@@ -460,13 +481,14 @@ vllm bench serve \
 | 风险 | 处理方式 |
 |---|---|
 | 画像工作负载过于单一 | 将结论限定为固定 workload，不宣称通用最优 |
-| 尺寸减少导致 padding 增加 | 在 plan JSON 中同时报告默认与 Lite 的预测 padding |
+| 尺寸减少导致 padding 增加 | 在 plan JSON 中同时报告默认、等秩与 PG 子集的预测 padding |
 | 吞吐不升反降 | 保留结果，解释启动成本与稳态性能的权衡 |
+| 只与默认全集比较会混淆“数量减少”和“画像选择” | 增加同尺寸预算、完全不读取画像的等秩 B 组 |
 | 最大观测尺寸小于默认上界 | 强制保留默认最大 capture size |
 | `NONE` 原因混杂 | 不用于规划，只报告计数 |
 | 日志前缀包含时间和 engine 信息 | 解析器搜索行内 `PG_CG_PROFILE=` 子串 |
 | R535 与 cu129 的 runtime/JIT 路径不兼容 | 三层门禁失败即停止，升级到 `575.57.08` 或更新驱动后重试 |
-| 多次运行温度波动 | A/B 交替执行并报告全部 3 个原始值 |
+| 多次运行温度波动 | A/B/C 使用交叉顺序并报告全部 3 个原始值 |
 
 ## 15. 完成定义
 
@@ -478,7 +500,8 @@ vllm bench serve \
 - 动态规划在随机小输入上与穷举结果一致；
 - 输出可直接用于原生 `--compilation-config`；
 - 20 条固定请求输出一致；
-- 默认组与 Lite 组各完成 3 次同 workload 实验；
+- 默认全集、同预算等秩子集和 PG 子集各完成 3 次同 workload 实验；
+- 完成一次并发 4 的轻量 workload-shift 检查；
 - 完成一张结果表和一张 capture 开销对比图；
 - 报告没有夸大结论，并注明遥测依赖补丁来源。
 

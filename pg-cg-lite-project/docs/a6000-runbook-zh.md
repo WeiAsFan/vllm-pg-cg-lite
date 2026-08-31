@@ -1,6 +1,6 @@
 # PG-CG Lite：A6000 完整操作手册
 
-> 目标：你拿到服务器后，从空目录开始，按本文顺序完成环境门禁、补丁应用、单元测试、画像、计划生成、正确性检查、6 次 A/B 实验和结果汇总。除用户名、服务器地址和工作目录外，不需要临时决定实验参数。
+> 目标：你拿到服务器后，从空目录开始，按本文顺序完成环境门禁、补丁应用、单元测试、画像、计划生成、正确性检查、9 次 A/B/C 主实验、轻量 workload-shift 检查和结果汇总。除用户名、服务器地址和工作目录外，不需要临时决定实验参数。
 
 ## 0. 本手册对应的固定版本
 
@@ -19,7 +19,7 @@
 | 画像请求数 | 300 |
 | 正确性请求数 | 20 |
 | 性能请求数 | 每次 500 |
-| A/B 次序 | `A1 → B1 → A2 → B2 → A3 → B3` |
+| A/B/C 次序 | `A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3` |
 | PG-CG Lite | `K=8` |
 
 本项目的 3 个提交按职责拆分为：
@@ -282,7 +282,7 @@ PY
   tests/benchmarks/test_pg_cg_lite.py
 ```
 
-预期分别是 2 个测试通过、15 个测试通过、两个 Ruff 命令通过。
+预期分别是 2 个测试通过、20 个测试通过、两个 Ruff 命令通过。
 
 ### 8.4 任一 CUDA 门禁失败时怎么做
 
@@ -364,9 +364,11 @@ export PGCG_PID_FILE="$PGCG_ROOT/vllm-server.pid"
 
 pgcg_start_server() {
   local run_name="$1"
-  local lite_config="${2:-}"
+  local compilation_config="${2:-}"
   local enable_metrics="${3:-0}"
   local log_file="$PGCG_LOG_DIR/${run_name}-server.log"
+  local start_ms
+  start_ms="$(date +%s%3N)"
   local cmd=(
     "$PGCG_REPO/.venv/bin/vllm" serve "$PGCG_MODEL"
     --served-model-name pg-cg-qwen
@@ -379,8 +381,8 @@ pgcg_start_server() {
     --port "$PGCG_PORT"
   )
 
-  if [[ -n "$lite_config" ]]; then
-    cmd+=(--compilation-config "$lite_config")
+  if [[ -n "$compilation_config" ]]; then
+    cmd+=(--compilation-config "$compilation_config")
   fi
   if [[ "$enable_metrics" == "1" ]]; then
     cmd+=(--cudagraph-metrics)
@@ -396,6 +398,11 @@ pgcg_start_server() {
 
   for _ in $(seq 1 180); do
     if curl -fsS "http://127.0.0.1:$PGCG_PORT/health" >/dev/null; then
+      local ready_ms
+      ready_ms="$(date +%s%3N)"
+      awk -v start="$start_ms" -v ready="$ready_ms" \
+        'BEGIN { printf "%.3f\n", (ready - start) / 1000 }' | \
+        tee "$PGCG_LOG_DIR/${run_name}-ready-seconds.txt"
       echo "服务已就绪：$run_name，PID=$server_pid"
       grep -q 'Using V2 Model Runner' "$log_file"
       grep -q 'Graph capturing finished' "$log_file"
@@ -473,6 +480,8 @@ pgcg_correctness_bench() {
 
 pgcg_perf_bench() {
   local label="$1"
+  local max_concurrency="${2:-16}"
+  local num_prompts="${3:-500}"
   "$PGCG_REPO/.venv/bin/vllm" bench serve \
     --backend vllm \
     --model pg-cg-qwen \
@@ -483,9 +492,10 @@ pgcg_perf_bench() {
     --dataset-name random \
     --input-len 512 \
     --output-len 128 \
-    --num-prompts 500 \
+    --num-prompts "$num_prompts" \
     --request-rate inf \
-    --max-concurrency 16 \
+    --max-concurrency "$max_concurrency" \
+    --metric-percentiles 95 \
     --seed 2026 \
     --temperature 0 \
     --ignore-eos \
@@ -493,12 +503,13 @@ pgcg_perf_bench() {
     --result-dir "$PGCG_LOG_DIR" \
     --result-filename "${label}.json"
 
-  "$PGCG_REPO/.venv/bin/python" - "$PGCG_LOG_DIR/${label}.json" <<'PY'
+  "$PGCG_REPO/.venv/bin/python" - \
+    "$PGCG_LOG_DIR/${label}.json" "$num_prompts" <<'PY'
 import json
 import sys
 
 result = json.load(open(sys.argv[1], encoding="utf-8"))
-assert result["completed"] == 500, result
+assert result["completed"] == int(sys.argv[2]), result
 assert result["failed"] == 0, result
 print("本轮通过：", sys.argv[1])
 PY
@@ -585,6 +596,27 @@ cd "$PGCG_REPO"
 
 .venv/bin/python -m json.tool "$PGCG_LOG_DIR/plan.json"
 
+for budget in 4 8 16; do
+  .venv/bin/python -m vllm.benchmarks.pg_cg_lite \
+    --log "$PGCG_LOG_DIR/profile-server.log" \
+    --max-sizes "$budget" \
+    --output "$PGCG_LOG_DIR/sensitivity-k${budget}.json"
+done
+
+.venv/bin/python - "$PGCG_LOG_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for budget in (4, 8, 16):
+    plan = json.loads((root / f"sensitivity-k{budget}.json").read_text())
+    print(
+        f"K={budget}: sizes={plan['selected_capture_size_count']}, "
+        f"padding={plan['selected_predicted_padding_tokens']}"
+    )
+PY
+
 export PGCG_LITE_CONFIG="$(
   .venv/bin/python - "$PGCG_LOG_DIR/plan.json" <<'PY'
 import json
@@ -595,8 +627,20 @@ print(json.dumps(plan["compilation_config"], separators=(",", ":")))
 PY
 )"
 
-printf 'PGCG_LITE_CONFIG=%s\n' "$PGCG_LITE_CONFIG" | \
-  tee "$PGCG_LOG_DIR/lite-config.txt"
+export PGCG_EQUAL_CONFIG="$(
+  .venv/bin/python - "$PGCG_LOG_DIR/plan.json" <<'PY'
+import json
+import sys
+
+plan = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps(plan["equal_budget_compilation_config"], separators=(",", ":")))
+PY
+)"
+
+{
+  printf 'PGCG_EQUAL_CONFIG=%s\n' "$PGCG_EQUAL_CONFIG"
+  printf 'PGCG_LITE_CONFIG=%s\n' "$PGCG_LITE_CONFIG"
+} | tee "$PGCG_LOG_DIR/candidate-configs.txt"
 ```
 
 自动门禁：
@@ -608,26 +652,40 @@ import sys
 
 plan = json.load(open(sys.argv[1], encoding="utf-8"))
 sizes = plan["selected_capture_sizes"]
+equal_sizes = plan["equal_budget_capture_sizes"]
 source_sizes = plan["source_capture_sizes"]
 assert plan["selection_policy"] == "default_capture_size_subset_dp"
+assert plan["equal_budget_selection_policy"] == "uniform_rank_default_subset"
 assert plan["max_capture_sizes"] == 8
 assert 1 <= len(sizes) <= 8
 assert sizes == sorted(set(sizes))
+assert len(equal_sizes) == len(sizes)
+assert equal_sizes == sorted(set(equal_sizes))
 assert set(sizes) <= set(source_sizes)
+assert set(equal_sizes) <= set(source_sizes)
 assert sizes[-1] == source_sizes[-1]
+assert equal_sizes[-1] == source_sizes[-1]
 assert sizes == plan["compilation_config"]["cudagraph_capture_sizes"]
+assert equal_sizes == plan["equal_budget_compilation_config"][
+    "cudagraph_capture_sizes"
+]
 assert plan["baseline_capture_size_count"] > 8, plan
 assert plan["baseline_capture_size_count"] == len(source_sizes), plan
 assert plan["selected_capture_size_count"] == len(sizes), plan
+assert plan["equal_budget_capture_size_count"] == len(equal_sizes), plan
 assert plan["baseline_predicted_padding_tokens"] >= 0
-assert plan["selected_predicted_padding_tokens"] >= 0
+assert (
+    plan["baseline_predicted_padding_tokens"]
+    <= plan["selected_predicted_padding_tokens"]
+    <= plan["equal_budget_predicted_padding_tokens"]
+)
 print("计划门禁通过：", plan["baseline_capture_size_count"], "->", len(sizes))
 PY
 ```
 
-`max_num_seqs=128` 时默认尺寸通常是 35 个。以日志中的实际值为准；若默认数量已经不大于 8，则该环境没有可剪枝空间，停止正式 A/B，不要声称项目有效。
+`max_num_seqs=128` 时默认尺寸通常是 35 个。以日志中的实际值为准；若默认数量已经不大于 8，则该环境没有可剪枝空间，停止正式 A/B/C，不要声称项目有效。
 
-## 14. 20 条请求正确性 A/B
+## 14. 20 条请求正确性 A/B/C
 
 默认组：
 
@@ -638,11 +696,20 @@ pgcg_stop_server
 pgcg_wait_cool 55
 ```
 
-Lite 组：
+同预算等秩组：
 
 ```bash
-pgcg_start_server correctness-B "$PGCG_LITE_CONFIG"
+pgcg_start_server correctness-B "$PGCG_EQUAL_CONFIG"
 pgcg_correctness_bench B
+pgcg_stop_server
+pgcg_wait_cool 55
+```
+
+PG-CG Lite 组：
+
+```bash
+pgcg_start_server correctness-C "$PGCG_LITE_CONFIG"
+pgcg_correctness_bench C
 pgcg_stop_server
 pgcg_wait_cool 55
 ```
@@ -656,90 +723,78 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-a = json.loads((root / "correctness-A.json").read_text())
-b = json.loads((root / "correctness-B.json").read_text())
-assert a["completed"] == b["completed"] == 20
-assert a["failed"] == b["failed"] == 0
-assert not any(a["errors"]), a["errors"]
-assert not any(b["errors"]), b["errors"]
-assert a["generated_texts"] == b["generated_texts"]
+results = {
+    group: json.loads((root / f"correctness-{group}.json").read_text())
+    for group in "ABC"
+}
+assert all(result["completed"] == 20 for result in results.values())
+assert all(result["failed"] == 0 for result in results.values())
+assert all(not any(result["errors"]) for result in results.values())
+assert results["A"]["generated_texts"] == results["B"]["generated_texts"]
+assert results["A"]["generated_texts"] == results["C"]["generated_texts"]
 print("正确性门禁通过：20/20 输出完全一致")
 PY
 ```
 
-如果输出不一致，停止性能结论，保留两个 JSON 并排查；不能只比较“看起来相似”。
+如果输出不一致，停止性能结论，保留三个 JSON 并排查；不能只比较“看起来相似”。
 
-## 15. 按固定次序完成 6 次性能实验
+## 15. 按固定次序完成 9 次 A/B/C 性能实验
 
-画像和正确性阶段已完成编译缓存预热。正式性能组都关闭 `--cudagraph-metrics`，避免画像日志影响 A/B。
-
-### A1
+画像和正确性阶段已完成编译缓存预热。正式性能组都关闭 `--cudagraph-metrics`，避免画像日志影响组间比较。A 是默认全集，B 是同预算等秩子集，C 是 PG-CG Lite 子集。
 
 ```bash
-pgcg_start_server A1
-pgcg_perf_bench A1
-pgcg_stop_server
-pgcg_wait_cool 55
-```
+pgcg_perf_run() {
+  local label="$1"
+  local compilation_config="${2:-}"
+  local max_concurrency="${3:-16}"
+  local num_prompts="${4:-500}"
 
-### B1
+  pgcg_start_server "$label" "$compilation_config"
+  pgcg_perf_bench "$label" "$max_concurrency" "$num_prompts"
+  pgcg_stop_server
+  pgcg_wait_cool 55
+}
 
-```bash
-pgcg_start_server B1 "$PGCG_LITE_CONFIG"
-pgcg_perf_bench B1
-pgcg_stop_server
-pgcg_wait_cool 55
-```
+# 第一轮：A → B → C
+pgcg_perf_run A1
+pgcg_perf_run B1 "$PGCG_EQUAL_CONFIG"
+pgcg_perf_run C1 "$PGCG_LITE_CONFIG"
 
-### A2
+# 第二轮：C → A → B
+pgcg_perf_run C2 "$PGCG_LITE_CONFIG"
+pgcg_perf_run A2
+pgcg_perf_run B2 "$PGCG_EQUAL_CONFIG"
 
-```bash
-pgcg_start_server A2
-pgcg_perf_bench A2
-pgcg_stop_server
-pgcg_wait_cool 55
-```
-
-### B2
-
-```bash
-pgcg_start_server B2 "$PGCG_LITE_CONFIG"
-pgcg_perf_bench B2
-pgcg_stop_server
-pgcg_wait_cool 55
-```
-
-### A3
-
-```bash
-pgcg_start_server A3
-pgcg_perf_bench A3
-pgcg_stop_server
-pgcg_wait_cool 55
-```
-
-### B3
-
-```bash
-pgcg_start_server B3 "$PGCG_LITE_CONFIG"
-pgcg_perf_bench B3
-pgcg_stop_server
-pgcg_wait_cool 55
+# 第三轮：B → C → A
+pgcg_perf_run B3 "$PGCG_EQUAL_CONFIG"
+pgcg_perf_run C3 "$PGCG_LITE_CONFIG"
+pgcg_perf_run A3
 ```
 
 完整性检查：
 
 ```bash
-for label in A1 B1 A2 B2 A3 B3; do
+for label in A1 B1 C1 C2 A2 B2 B3 C3 A3; do
   test -s "$PGCG_LOG_DIR/${label}.json"
   test -s "$PGCG_LOG_DIR/${label}-server.log"
+  test -s "$PGCG_LOG_DIR/${label}-ready-seconds.txt"
   grep 'Graph capturing finished' "$PGCG_LOG_DIR/${label}-server.log"
 done
 ```
 
 不要删除某个差结果，也不要增加“最好的一次”替换它。
 
-## 16. 自动汇总结果并生成一张图
+## 16. 轻量 workload-shift 检查
+
+主实验完成后，把并发从 16 改为 4，每组只运行 200 条请求。该检查不重复三次、不进入主结论，只用于观察画像选择在一个简单分布变化下是否出现明显退化。
+
+```bash
+pgcg_perf_run shift-A "" 4 200
+pgcg_perf_run shift-B "$PGCG_EQUAL_CONFIG" 4 200
+pgcg_perf_run shift-C "$PGCG_LITE_CONFIG" 4 200
+```
+
+## 17. 自动汇总结果并生成一张图
 
 ```bash
 .venv/bin/python - "$PGCG_LOG_DIR" <<'PY'
@@ -752,7 +807,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 root = Path(sys.argv[1])
-labels = ["A1", "B1", "A2", "B2", "A3", "B3"]
+labels = ["A1", "B1", "C1", "C2", "A2", "B2", "B3", "C3", "A3"]
 capture_pattern = re.compile(
     r"Graph capturing finished in ([0-9.]+) secs, took ([0-9.]+) GiB"
 )
@@ -765,18 +820,42 @@ for label in labels:
         raise RuntimeError(f"{label} 应有且仅有一条 capture 日志，实际为 {matches}")
     capture_time, capture_memory = map(float, matches[0])
     rows[label] = {
+        "ready_time_s": float(
+            (root / f"{label}-ready-seconds.txt").read_text().strip()
+        ),
         "capture_time_s": capture_time,
         "capture_memory_gib": capture_memory,
         "request_throughput": float(result["request_throughput"]),
+        "median_ttft_ms": float(result["median_ttft_ms"]),
+        "p95_ttft_ms": float(result["p95_ttft_ms"]),
         "median_tpot_ms": float(result["median_tpot_ms"]),
+        "p95_tpot_ms": float(result["p95_tpot_ms"]),
         "completed": int(result["completed"]),
         "failed": int(result["failed"]),
     }
 
 plan = json.loads((root / "plan.json").read_text())
-correct_a = json.loads((root / "correctness-A.json").read_text())
-correct_b = json.loads((root / "correctness-B.json").read_text())
-outputs_match = correct_a["generated_texts"] == correct_b["generated_texts"]
+correctness = {
+    group: json.loads((root / f"correctness-{group}.json").read_text())
+    for group in "ABC"
+}
+outputs_match = all(
+    correctness["A"]["generated_texts"] == correctness[group]["generated_texts"]
+    for group in "BC"
+)
+shift = {}
+for group in "ABC":
+    result = json.loads((root / f"shift-{group}.json").read_text())
+    shift[group] = {
+        key: result[key]
+        for key in (
+            "request_throughput",
+            "median_ttft_ms",
+            "p95_ttft_ms",
+            "median_tpot_ms",
+            "p95_tpot_ms",
+        )
+    }
 
 def median(group, metric):
     return statistics.median(rows[f"{group}{index}"][metric] for index in (1, 2, 3))
@@ -785,55 +864,95 @@ def change(a, b):
     return (b - a) / a * 100.0
 
 metrics = {
-    "capture_time_s": (median("A", "capture_time_s"), median("B", "capture_time_s")),
-    "capture_memory_gib": (
-        median("A", "capture_memory_gib"),
-        median("B", "capture_memory_gib"),
-    ),
-    "request_throughput": (
-        median("A", "request_throughput"),
-        median("B", "request_throughput"),
-    ),
-    "median_tpot_ms": (
-        median("A", "median_tpot_ms"),
-        median("B", "median_tpot_ms"),
-    ),
+    metric: tuple(median(group, metric) for group in "ABC")
+    for metric in (
+        "ready_time_s",
+        "capture_time_s",
+        "capture_memory_gib",
+        "request_throughput",
+        "median_ttft_ms",
+        "p95_ttft_ms",
+        "median_tpot_ms",
+        "p95_tpot_ms",
+    )
 }
 
 summary = {
     "raw_runs": rows,
     "medians": {
-        name: {"A": values[0], "B": values[1], "change_percent": change(*values)}
+        name: {
+            "A": values[0],
+            "B": values[1],
+            "C": values[2],
+            "B_vs_A_percent": change(values[0], values[1]),
+            "C_vs_A_percent": change(values[0], values[2]),
+            "C_vs_B_percent": change(values[1], values[2]),
+        }
         for name, values in metrics.items()
     },
     "capture_size_count": {
         "A": plan["baseline_capture_size_count"],
-        "B": plan["selected_capture_size_count"],
+        "B": plan["equal_budget_capture_size_count"],
+        "C": plan["selected_capture_size_count"],
     },
+    "predicted_padding_tokens": {
+        "A": plan["baseline_predicted_padding_tokens"],
+        "B": plan["equal_budget_predicted_padding_tokens"],
+        "C": plan["selected_predicted_padding_tokens"],
+    },
+    "actual_cudagraph_count": None,
+    "actual_cudagraph_count_note": (
+        "未从稳定指标观测；capture-size 数量不等于实际 graph 数量"
+    ),
+    "workload_shift_concurrency_4": shift,
     "outputs_match_20_of_20": outputs_match,
-    "throughput_non_regression": change(*metrics["request_throughput"]) >= -5.0,
-    "tpot_non_regression": change(*metrics["median_tpot_ms"]) <= 5.0,
+    "throughput_non_regression": (
+        change(metrics["request_throughput"][0], metrics["request_throughput"][2])
+        >= -5.0
+    ),
+    "tpot_non_regression": (
+        change(metrics["median_tpot_ms"][0], metrics["median_tpot_ms"][2])
+        <= 5.0
+    ),
 }
 (root / "summary.json").write_text(
     json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
 
 table = [
-    "| 指标 | 默认 A 中位数 | Lite B 中位数 | 相对变化 | 判定 |",
-    "|---|---:|---:|---:|---|",
+    "| 指标 | 默认 A | 等秩 B | PG-CG C | C 相对 A | C 相对 B | 判定 |",
+    "|---|---:|---:|---:|---:|---:|---|",
     f"| capture-size 数量 | {plan['baseline_capture_size_count']} | "
-    f"{plan['selected_capture_size_count']} | - | B ≤ 8 |",
+    f"{plan['equal_budget_capture_size_count']} | "
+    f"{plan['selected_capture_size_count']} | - | - | B 与 C 同预算 |",
+    "| 实际 CUDA Graph 数量 | 未观测 | 未观测 | 未观测 | - | - | "
+    "不以 size 数量代替 |",
+    f"| 画像预测 padding / token | "
+    f"{plan['baseline_predicted_padding_tokens']} | "
+    f"{plan['equal_budget_predicted_padding_tokens']} | "
+    f"{plan['selected_predicted_padding_tokens']} | - | "
+    f"{plan['selected_predicted_padding_tokens'] - plan['equal_budget_predicted_padding_tokens']:+d} | 越低越好 |",
 ]
 display = [
+    ("Time-to-ready / s", "ready_time_s", "越低越好"),
     ("Graph capture 时间 / s", "capture_time_s", "越低越好"),
     ("Graph capture 显存 / GiB", "capture_memory_gib", "越低越好"),
     ("Request throughput / req/s", "request_throughput", "下降不超过 5%"),
+    ("Median TTFT / ms", "median_ttft_ms", "越低越好"),
+    ("P95 TTFT / ms", "p95_ttft_ms", "越低越好"),
     ("Median TPOT / ms", "median_tpot_ms", "上升不超过 5%"),
+    ("P95 TPOT / ms", "p95_tpot_ms", "越低越好"),
 ]
 for title, key, rule in display:
-    a, b = metrics[key]
-    table.append(f"| {title} | {a:.4f} | {b:.4f} | {change(a, b):+.2f}% | {rule} |")
-table.append(f"| 20 条输出一致性 | - | - | - | {'完全一致' if outputs_match else '失败'} |")
+    a, b, c = metrics[key]
+    table.append(
+        f"| {title} | {a:.4f} | {b:.4f} | {c:.4f} | "
+        f"{change(a, c):+.2f}% | {change(b, c):+.2f}% | {rule} |"
+    )
+table.append(
+    f"| 20 条输出一致性 | - | - | - | - | - | "
+    f"{'完全一致' if outputs_match else '失败'} |"
+)
 (root / "results.md").write_text("\n".join(table) + "\n", encoding="utf-8")
 
 fig, axes = plt.subplots(1, 2, figsize=(8, 3.5))
@@ -842,7 +961,11 @@ for axis, key, title, unit in (
     (axes[1], "capture_memory_gib", "CUDA Graph 捕获显存", "GiB"),
 ):
     values = metrics[key]
-    bars = axis.bar(["默认 A", "PG-CG Lite B"], values, color=["#6b7280", "#2563eb"])
+    bars = axis.bar(
+        ["默认 A", "等秩 B", "PG-CG C"],
+        values,
+        color=["#6b7280", "#d97706", "#2563eb"],
+    )
     axis.set_title(title)
     axis.set_ylabel(unit)
     axis.bar_label(bars, fmt="%.2f")
@@ -864,25 +987,28 @@ cat "$PGCG_LOG_DIR/results.md"
 ls -lh "$PGCG_LOG_DIR/capture-comparison.png"
 ```
 
-## 17. 结果判定规则
+## 18. 结果判定规则
 
 主结论按以下优先级写：
 
-1. `selected_capture_size_count <= 8` 且明显小于默认数量；
-2. capture 时间和/或 capture 显存下降；
-3. 请求吞吐下降不超过 5%；
-4. median TPOT 上升不超过 5%；
-5. 20/20 输出完全一致。
+1. B 与 C 的 capture-size 数量相同、都不超过 8，且明显小于默认数量；
+2. 画像预测 padding 满足 `A <= C <= B`；
+3. A 对 C 的 capture 时间、capture 显存和 time-to-ready 是否改善；
+4. B 对 C 在同预算下是否出现额外收益；
+5. C 相对 A 的请求吞吐下降不超过 5%、median TPOT 上升不超过 5%；
+6. A/B/C 的 20/20 输出完全一致。
 
 三种结果都可以作为项目结论：
 
-- capture 开销下降、稳态非劣：方案在该固定 workload 上有效；
-- capture 开销下降、稳态退化超过 5%：展示图数量与 padding 的明确权衡；
-- capture 开销没有下降：保留负结果，说明该模型/版本的 graph 数量并非主要启动瓶颈。
+- C 优于 A 且优于同预算 B：画像指导的子集在该固定 workload 上显示了额外价值；
+- B 与 C 接近：减少 capture-size 数量有效，但当前画像目标没有显示超越简单等秩剪枝的额外收益；
+- C 的预测 padding 低于 B、真实性能却不优于 B：说明 padding 代理不足以单独预测 GPU 性能；
+- capture 开销下降但稳态退化超过 5%：展示初始化成本与运行时 padding 的明确权衡；
+- capture 开销没有下降：保留负结果，说明该模型/版本的 capture-size 数量并非主要启动瓶颈。
 
-不要使用“通用最优”“生产提升已证明”或“统计显著”等表述。只有 1 张卡、1 个模型、1 种 workload、每组 3 次。
+不要使用“通用最优”“生产提升已证明”或“统计显著”等表述。只有 1 张卡、1 个模型、1 个主 workload、每组 3 次；并发 4 的 shift 只运行 1 次，只能作为边界提示。
 
-## 18. 唯一允许的 OOM 回退
+## 19. 唯一允许的 OOM 回退
 
 若默认配置在启动 capture 阶段 OOM，统一把服务函数中的两项改为：
 
@@ -891,11 +1017,11 @@ ls -lh "$PGCG_LOG_DIR/capture-comparison.png"
 --gpu-memory-utilization 0.80
 ```
 
-然后删除本轮未完成的结论，从第 11 节开始重新执行画像、计划、正确性和全部 6 次 A/B。不能让 A 使用 128、B 使用 64，也不能沿用旧 `plan.json`。回退后默认 capture sizes 通常约 19 个，仍可与 8 个形成清晰对比。
+然后删除本轮未完成的结论，从第 11 节开始重新执行画像、计划、正确性、全部 9 次 A/B/C 和 shift 检查。不能让三组使用不同的 `max_num_seqs`，也不能沿用旧 `plan.json`。回退后默认 capture sizes 通常约 19 个，仍可与 8 个形成清晰对比。
 
 如果 64 仍 OOM，不继续降低到使默认尺寸数接近 8；改用更小模型并把“模型变化”写入实验条件，或先解决环境问题。
 
-## 19. 常见故障定位
+## 20. 常见故障定位
 
 | 现象 | 原因与动作 |
 |---|---|
@@ -907,10 +1033,10 @@ ls -lh "$PGCG_LOG_DIR/capture-comparison.png"
 | plan 报不同 capture config | 日志混入了不同服务运行；只给脚本传单次 profile server 日志 |
 | Lite 启动时报配置不一致 | 确认计划来自同一 vLLM commit、同一 max tokens/seqs 配置 |
 | 正确性不一致 | 停止性能结论，保留详细 JSON 与服务日志 |
-| 某轮 `completed != 500` 或 `failed != 0` | 该轮无效；先定位错误，再按原 A/B 顺序从该配对开始重做，并注明 |
+| 某轮 `completed` 不等于该命令的请求数或 `failed != 0` | 该轮无效；先定位错误，再按预注册 A/B/C 顺序从该轮开始重做，并注明 |
 | 服务停止后仍有本人的 vLLM 进程 | 不启动下一组；根据 PID/进程组优雅终止并确认显存释放 |
 
-## 20. 服务器实验完成后带回的文件
+## 21. 服务器实验完成后带回的文件
 
 把整个日志目录复制回当前电脑：
 
@@ -930,11 +1056,17 @@ scp -r 你的用户名@服务器地址:服务器上的绝对路径/pg-cg-lite-wo
 profile-server.log
 profile-lines.txt
 plan.json
-lite-config.txt
+sensitivity-k4.json sensitivity-k8.json sensitivity-k16.json
+candidate-configs.txt
 correctness-A.json
 correctness-B.json
-A1.json B1.json A2.json B2.json A3.json B3.json
-A1-server.log B1-server.log ... A3-server.log B3-server.log
+correctness-C.json
+A1.json B1.json C1.json C2.json A2.json B2.json B3.json C3.json A3.json
+A1-server.log B1-server.log C1-server.log ... B3-server.log C3-server.log A3-server.log
+A1-ready-seconds.txt B1-ready-seconds.txt ... C3-ready-seconds.txt A3-ready-seconds.txt
+shift-A.json shift-B.json shift-C.json
+shift-A-server.log shift-B-server.log shift-C-server.log
+shift-A-ready-seconds.txt shift-B-ready-seconds.txt shift-C-ready-seconds.txt
 summary.json
 results.md
 capture-comparison.png
@@ -942,11 +1074,11 @@ capture-comparison.png
 
 这些原始文件足以复核全部结论，也是面试时最有价值的证据链。
 
-## 21. 面试时用 60 秒讲清
+## 22. 面试时用 60 秒讲清
 
 1. vLLM 默认按规则捕获一组 CUDA Graph sizes，但不知道业务的真实 scheduled-token 分布。
 2. 我补齐了 Model Runner V2 的指标传播，并让现有低频日志输出机器可读直方图。
 3. 离线规划器只在默认 capture-size 集合中做精确子集搜索；当前 DP 为 `O(Km² log n)`，保留原最大覆盖上界并最小化画像上的预测 padding。
 4. 在线热路径没有增加搜索，也没有修改 scheduler、kernel 或配置协议。
-5. 我用单卡 A6000、同一模型快照、同一 workload 做默认与 Lite 各 3 次交替实验，比较 capture 时间、capture 显存、吞吐和 TPOT，并做 20 条输出一致性检查。
+5. 我用单卡 A6000、同一模型快照和同一 workload 比较默认全集、同预算等秩子集与画像子集，每组 3 次交叉运行，并检查启动、TTFT、TPOT、吞吐和 20 条输出一致性。
 6. 结论只对该画像 workload 负责；流量分布变化后需要重新画像。

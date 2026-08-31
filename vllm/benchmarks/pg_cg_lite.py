@@ -83,6 +83,17 @@ def predict_padding(histogram: Mapping[int, int], capture_sizes: Sequence[int]) 
     return total
 
 
+def _normalize_source_sizes(source_capture_sizes: Sequence[int]) -> tuple[int, ...]:
+    source_sizes = tuple(source_capture_sizes)
+    if (
+        not source_sizes
+        or source_sizes != tuple(sorted(set(source_sizes)))
+        or source_sizes[0] <= 0
+    ):
+        raise ValueError("source_capture_sizes must be sorted positive integers")
+    return source_sizes
+
+
 def select_capture_sizes(
     histogram: Mapping[int, int],
     max_sizes: int,
@@ -93,13 +104,7 @@ def select_capture_sizes(
     if any(token_count <= 0 or count <= 0 for token_count, count in histogram.items()):
         raise ValueError("histogram keys and counts must be positive")
 
-    source_sizes = tuple(source_capture_sizes)
-    if (
-        not source_sizes
-        or source_sizes != tuple(sorted(set(source_sizes)))
-        or source_sizes[0] <= 0
-    ):
-        raise ValueError("source_capture_sizes must be sorted positive integers")
+    source_sizes = _normalize_source_sizes(source_capture_sizes)
     if max(histogram) > source_sizes[-1]:
         raise ValueError("source capture-size maximum must cover the histogram")
 
@@ -149,18 +154,42 @@ def select_capture_sizes(
     return result[1]
 
 
+def select_uniform_rank_subset(
+    source_capture_sizes: Sequence[int], size_count: int
+) -> tuple[int, ...]:
+    if size_count < 1:
+        raise ValueError("size_count must be positive")
+    source_sizes = _normalize_source_sizes(source_capture_sizes)
+    selected_count = min(size_count, len(source_sizes))
+    if selected_count == 1:
+        return (source_sizes[-1],)
+
+    denominator = selected_count - 1
+    indexes = (
+        (index * (len(source_sizes) - 1) + denominator // 2) // denominator
+        for index in range(selected_count)
+    )
+    return tuple(source_sizes[index] for index in indexes)
+
+
 def build_plan(profile: Profile, max_sizes: int) -> dict[str, object]:
     selected = select_capture_sizes(
         profile.histogram, max_sizes, profile.source_capture_sizes
     )
+    equal_budget = select_uniform_rank_subset(
+        profile.source_capture_sizes, len(selected)
+    )
     return {
         "selection_policy": "default_capture_size_subset_dp",
+        "equal_budget_selection_policy": "uniform_rank_default_subset",
         "max_capture_sizes": max_sizes,
         "source_capture_sizes": list(profile.source_capture_sizes),
+        "equal_budget_capture_sizes": list(equal_budget),
         "selected_capture_sizes": list(selected),
         "profile_event_count": sum(profile.histogram.values()),
         "none_event_count": profile.none_event_count,
         "baseline_capture_size_count": len(profile.source_capture_sizes),
+        "equal_budget_capture_size_count": len(equal_budget),
         "selected_capture_size_count": len(selected),
         "baseline_predicted_padding_tokens": predict_padding(
             profile.histogram, profile.source_capture_sizes
@@ -168,6 +197,12 @@ def build_plan(profile: Profile, max_sizes: int) -> dict[str, object]:
         "selected_predicted_padding_tokens": predict_padding(
             profile.histogram, selected
         ),
+        "equal_budget_predicted_padding_tokens": predict_padding(
+            profile.histogram, equal_budget
+        ),
+        "equal_budget_compilation_config": {
+            "cudagraph_capture_sizes": list(equal_budget)
+        },
         "compilation_config": {"cudagraph_capture_sizes": list(selected)},
     }
 
@@ -191,6 +226,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"predicted padding tokens: {plan['baseline_predicted_padding_tokens']} -> "
         f"{plan['selected_predicted_padding_tokens']}"
+    )
+    print(
+        "equal-budget predicted padding tokens: "
+        f"{plan['equal_budget_predicted_padding_tokens']}"
     )
     print(json.dumps(plan["compilation_config"], separators=(",", ":")))
     return 0
