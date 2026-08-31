@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -84,54 +84,79 @@ def predict_padding(histogram: Mapping[int, int], capture_sizes: Sequence[int]) 
 
 
 def select_capture_sizes(
-    histogram: Mapping[int, int], max_graphs: int, max_capture_size: int
+    histogram: Mapping[int, int],
+    max_sizes: int,
+    source_capture_sizes: Sequence[int],
 ) -> tuple[int, ...]:
-    if max_graphs < 1 or not histogram:
-        raise ValueError("max_graphs and histogram must be non-zero")
-    if max(histogram) > max_capture_size:
-        raise ValueError("max_capture_size must cover the histogram")
+    if max_sizes < 1 or not histogram:
+        raise ValueError("max_sizes and histogram must be non-zero")
+    if any(token_count <= 0 or count <= 0 for token_count, count in histogram.items()):
+        raise ValueError("histogram keys and counts must be positive")
 
-    weighted = Counter(histogram)
-    weighted.setdefault(max_capture_size, 0)
-    points = sorted(weighted)
-    groups = min(max_graphs, len(points))
+    source_sizes = tuple(source_capture_sizes)
+    if (
+        not source_sizes
+        or source_sizes != tuple(sorted(set(source_sizes)))
+        or source_sizes[0] <= 0
+    ):
+        raise ValueError("source_capture_sizes must be sorted positive integers")
+    if max(histogram) > source_sizes[-1]:
+        raise ValueError("source capture-size maximum must cover the histogram")
+
+    points = sorted(histogram)
     prefix_count = [0]
     prefix_tokens = [0]
     for point in points:
-        prefix_count.append(prefix_count[-1] + weighted[point])
-        prefix_tokens.append(prefix_tokens[-1] + point * weighted[point])
+        prefix_count.append(prefix_count[-1] + histogram[point])
+        prefix_tokens.append(prefix_tokens[-1] + point * histogram[point])
 
-    # dp[g][j] = minimum padding and endpoints for points[:j] in g groups.
+    def interval_cost(previous: int | None, endpoint: int) -> int:
+        start = 0 if previous is None else bisect_right(points, previous)
+        stop = bisect_right(points, endpoint)
+        count = prefix_count[stop] - prefix_count[start]
+        tokens = prefix_tokens[stop] - prefix_tokens[start]
+        return endpoint * count - tokens
+
+    groups = min(max_sizes, len(source_sizes))
     dp: list[list[tuple[int, tuple[int, ...]] | None]] = [
-        [None] * (len(points) + 1) for _ in range(groups + 1)
+        [None] * len(source_sizes) for _ in range(groups + 1)
     ]
-    dp[0][0] = (0, ())
-    for group in range(1, groups + 1):
-        for stop in range(group, len(points) + 1):
+    for stop, endpoint in enumerate(source_sizes):
+        dp[1][stop] = (interval_cost(None, endpoint), (endpoint,))
+
+    for group in range(2, groups + 1):
+        for stop in range(group - 1, len(source_sizes)):
+            endpoint = source_sizes[stop]
             candidates = []
-            for start in range(group - 1, stop):
-                previous = dp[group - 1][start]
+            for previous_index in range(group - 2, stop):
+                previous = dp[group - 1][previous_index]
                 if previous is None:
                     continue
-                count = prefix_count[stop] - prefix_count[start]
-                tokens = prefix_tokens[stop] - prefix_tokens[start]
-                endpoint = points[stop - 1]
                 candidates.append(
-                    (previous[0] + endpoint * count - tokens, previous[1] + (endpoint,))
+                    (
+                        previous[0]
+                        + interval_cost(source_sizes[previous_index], endpoint),
+                        previous[1] + (endpoint,),
+                    )
                 )
-            dp[group][stop] = min(candidates)
+            if candidates:
+                dp[group][stop] = min(candidates)
 
-    result = dp[groups][-1]
-    assert result is not None
+    final_states = [
+        state for group in range(1, groups + 1) if (state := dp[group][-1]) is not None
+    ]
+    result = min(final_states, key=lambda state: (state[0], len(state[1]), state[1]))
     return result[1]
 
 
-def build_plan(profile: Profile, max_graphs: int) -> dict[str, object]:
+def build_plan(profile: Profile, max_sizes: int) -> dict[str, object]:
     selected = select_capture_sizes(
-        profile.histogram, max_graphs, profile.source_capture_sizes[-1]
+        profile.histogram, max_sizes, profile.source_capture_sizes
     )
     return {
-        "max_graphs": max_graphs,
+        "selection_policy": "default_capture_size_subset_dp",
+        "max_capture_sizes": max_sizes,
+        "source_capture_sizes": list(profile.source_capture_sizes),
         "selected_capture_sizes": list(selected),
         "profile_event_count": sum(profile.histogram.values()),
         "none_event_count": profile.none_event_count,
@@ -152,11 +177,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Build a small profile-guided CUDA Graph capture plan."
     )
     parser.add_argument("--log", type=Path, required=True)
-    parser.add_argument("--max-graphs", type=int, default=8)
+    parser.add_argument("--max-sizes", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
-    plan = build_plan(parse_profile_log(args.log), args.max_graphs)
+    plan = build_plan(parse_profile_log(args.log), args.max_sizes)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
     print(

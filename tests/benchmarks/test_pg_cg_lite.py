@@ -53,37 +53,72 @@ def test_parse_profile_lines_merges_intervals() -> None:
     assert profile.source_capture_sizes == tuple(SIZES)
 
 
-def test_two_sizes_choose_minimum_padding_partition() -> None:
+def test_two_sizes_choose_minimum_padding_default_subset() -> None:
     histogram = {1: 5, 3: 3, 8: 2}
-    selected = select_capture_sizes(histogram, max_graphs=2, max_capture_size=8)
-    assert selected == (3, 8)
-    assert predict_padding(histogram, selected) == 10
+    selected = select_capture_sizes(histogram, max_sizes=2, source_capture_sizes=SIZES)
+    assert selected == (1, 8)
+    assert predict_padding(histogram, selected) == 15
 
 
 def brute_force(
-    histogram: dict[int, int], max_graphs: int, maximum: int
+    histogram: dict[int, int], max_sizes: int, source_sizes: list[int]
 ) -> tuple[int, ...]:
-    points = sorted(set(histogram) | {maximum})
     candidates = (
         chosen
-        for chosen in combinations(points, min(max_graphs, len(points)))
-        if chosen[-1] == maximum
+        for size_count in range(1, min(max_sizes, len(source_sizes)) + 1)
+        for chosen in combinations(source_sizes, size_count)
+        if chosen[-1] == source_sizes[-1]
     )
     return min(
-        candidates, key=lambda chosen: (predict_padding(histogram, chosen), chosen)
+        candidates,
+        key=lambda chosen: (predict_padding(histogram, chosen), len(chosen), chosen),
     )
 
 
 def test_dynamic_programming_matches_brute_force() -> None:
     random = Random(2026)
     for _ in range(50):
-        points = sorted(random.sample(range(1, 31), random.randint(2, 8)))
-        histogram = {point: random.randint(1, 9) for point in points}
-        maximum = points[-1] + random.randint(0, 3)
-        max_graphs = random.randint(1, min(4, len(points)))
-        assert select_capture_sizes(histogram, max_graphs, maximum) == brute_force(
-            histogram, max_graphs, maximum
+        source_sizes = sorted(random.sample(range(1, 31), random.randint(2, 8)))
+        points = sorted(
+            random.sample(
+                range(1, source_sizes[-1] + 1),
+                random.randint(1, min(8, source_sizes[-1])),
+            )
         )
+        histogram = {point: random.randint(1, 9) for point in points}
+        max_sizes = random.randint(1, min(4, len(source_sizes)))
+        assert select_capture_sizes(histogram, max_sizes, source_sizes) == brute_force(
+            histogram, max_sizes, source_sizes
+        )
+
+
+def test_result_is_a_default_subset_and_preserves_maximum() -> None:
+    selected = select_capture_sizes({3: 7, 7: 2}, 3, SIZES)
+    assert set(selected) <= set(SIZES)
+    assert selected[-1] == SIZES[-1]
+    assert len(selected) <= 3
+
+
+def test_equal_padding_prefers_fewer_sizes() -> None:
+    assert select_capture_sizes({8: 4}, 4, SIZES) == (8,)
+
+
+def test_budget_covering_all_used_default_sizes_keeps_them() -> None:
+    assert select_capture_sizes({size: 1 for size in SIZES}, 8, SIZES) == tuple(SIZES)
+
+
+@pytest.mark.parametrize(
+    "source_sizes",
+    [[], [1, 4, 2, 8], [1, 2, 2, 8], [0, 1, 2, 8]],
+)
+def test_select_rejects_invalid_source_sizes(source_sizes: list[int]) -> None:
+    with pytest.raises(ValueError, match="source_capture_sizes"):
+        select_capture_sizes({1: 1}, 2, source_sizes)
+
+
+def test_select_rejects_uncovered_histogram() -> None:
+    with pytest.raises(ValueError, match="must cover"):
+        select_capture_sizes({9: 1}, 2, SIZES)
 
 
 def test_parse_rejects_empty_profile() -> None:
@@ -101,6 +136,9 @@ def test_parse_rejects_mixed_capture_configs() -> None:
 def test_build_plan_is_directly_applicable() -> None:
     plan = build_plan(parse_profile_lines([profile_line(event(3, 5), event(8))]), 2)
     assert plan["selected_capture_size_count"] == 2
+    assert plan["selection_policy"] == "default_capture_size_subset_dp"
+    assert plan["max_capture_sizes"] == 2
+    assert plan["source_capture_sizes"] == SIZES
     assert plan["compilation_config"] == {
         "cudagraph_capture_sizes": plan["selected_capture_sizes"]
     }
@@ -112,10 +150,8 @@ def test_main_writes_plan_file(
     log_path, output_path = tmp_path / "server.log", tmp_path / "plan.json"
     log_path.write_text(profile_line(event(3, 5), event(8)), encoding="utf-8")
     assert (
-        main(
-            ["--log", str(log_path), "--max-graphs", "2", "--output", str(output_path)]
-        )
+        main(["--log", str(log_path), "--max-sizes", "2", "--output", str(output_path)])
         == 0
     )
-    assert json.loads(output_path.read_text())["selected_capture_sizes"] == [3, 8]
-    assert '"cudagraph_capture_sizes":[3,8]' in capsys.readouterr().out
+    assert json.loads(output_path.read_text())["selected_capture_sizes"] == [4, 8]
+    assert '"cudagraph_capture_sizes":[4,8]' in capsys.readouterr().out
