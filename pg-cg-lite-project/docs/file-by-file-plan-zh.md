@@ -196,6 +196,7 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 ### 服务器待验证门禁
 
 - 规划器不导入 torch，不增加运行依赖；
+- 统一从 `bash pg-cg-lite-project/scripts/verify-linux.sh` 进入，脚本在非 Linux 环境主动退出；
 - 在 Linux 项目环境运行全部 20 个 planner 测试；
 - 在同一环境运行画像日志测试、Ruff、格式、编译和 diff 检查；
 - GPU 冒烟确认真实日志满足子集规划输入契约；

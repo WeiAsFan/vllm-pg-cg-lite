@@ -344,6 +344,12 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
 
 `nvidia-smi` 中的 `CUDA Version: 12.2` 是驱动能力上限，与 PyTorch 实际加载的 CUDA runtime 不是同一个概念。R535 路线固定使用 vLLM v0.27.1 官方 `cu129` 轮子，并在实验开始前执行以下检查：
 
+单元测试、补丁哈希和 Ruff 统一通过 Linux 固定入口执行；脚本会主动拒绝在非 Linux 环境运行：
+
+```bash
+bash pg-cg-lite-project/scripts/verify-linux.sh
+```
+
 ```bash
 nvidia-smi
 .venv/bin/python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0))"

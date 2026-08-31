@@ -260,6 +260,15 @@ PY
 
 ### 8.3 门禁三：项目单元测试
 
+统一执行项目提供的 Linux 固定验证入口。脚本会拒绝在非 Linux 环境运行，并依次校验补丁哈希、画像日志测试、planner 测试以及两项 Ruff 检查：
+
+```bash
+bash pg-cg-lite-project/scripts/verify-linux.sh \
+  |& tee "$PGCG_LOG_DIR/03-linux-verification.txt"
+```
+
+以下命令是该入口的展开形式，仅用于排查某一步失败；正式留档以脚本输出为准：
+
 ```bash
 .venv/bin/python -m pytest \
   --confcutdir=tests/v1/cudagraph \
@@ -284,7 +293,7 @@ PY
   tests/benchmarks/test_pg_cg_lite.py
 ```
 
-预期分别是 2 个测试通过、20 个测试通过、两个 Ruff 命令通过。
+预期补丁哈希全部通过、2 个画像日志测试通过、20 个 planner 测试通过、两个 Ruff 命令通过。
 
 ### 8.4 任一 CUDA 门禁失败时怎么做
 

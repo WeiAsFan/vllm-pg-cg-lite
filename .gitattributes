@@ -1,2 +1,3 @@
 pg-cg-lite-project/patches/*.patch text eol=lf
 pg-cg-lite-project/patches/SHA256SUMS.txt text eol=lf
+pg-cg-lite-project/scripts/*.sh text eol=lf
