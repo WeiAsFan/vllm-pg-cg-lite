@@ -1,12 +1,17 @@
 From 9b744cf30fd7b5ccff9d6e7328cb6662c27f8209 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Tue, 25 Aug 2026 00:03:54 +0800
-Subject: [PATCH 2/3] feat: emit machine-readable cudagraph profile metrics
+Subject: [PATCH 2/5] feat: emit machine-readable cudagraph profile metrics
 
+---
+ tests/v1/cudagraph/test_cudagraph_logging.py | 63 ++++++++++++++++++++
+ vllm/compilation/cuda_graph.py               | 38 +++++++++++-
+ 2 files changed, 100 insertions(+), 1 deletion(-)
+ create mode 100644 tests/v1/cudagraph/test_cudagraph_logging.py
 
 diff --git a/tests/v1/cudagraph/test_cudagraph_logging.py b/tests/v1/cudagraph/test_cudagraph_logging.py
 new file mode 100644
-index 0000000..61a2878
+index 000000000..61a28789c
 --- /dev/null
 +++ b/tests/v1/cudagraph/test_cudagraph_logging.py
 @@ -0,0 +1,63 @@
@@ -74,7 +79,7 @@ index 0000000..61a2878
 +    assert messages[1].startswith(PROFILE_PREFIX)
 +    assert logging.stats == []
 diff --git a/vllm/compilation/cuda_graph.py b/vllm/compilation/cuda_graph.py
-index b63d861..29c27e0 100644
+index b63d86199..29c27e03f 100644
 --- a/vllm/compilation/cuda_graph.py
 +++ b/vllm/compilation/cuda_graph.py
 @@ -2,6 +2,7 @@

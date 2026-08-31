@@ -1,3 +1,5 @@
-4b56b37fe4c001b3f7d5b6188cad58033c7f4228246881d91661f72a800690d7  0001-fix-backport-model-runner-v2-cudagraph-metrics-propa.patch
-5617d1f04a47724e3bd7577f357bfbc514be7e058f3d80b5f4acb68a8015f456  0002-feat-emit-machine-readable-cudagraph-profile-metrics.patch
-3248a491d97f77b4c19f14d403d7ee1778a97eaad332705619d35c59062a74ec  0003-feat-add-lightweight-profile-guided-cudagraph-planne.patch
+d8d642cb2a1a68f9d45877f58abeb9bd20d20d2b6cc933d963484322fe5aac44  0001-fix-backport-model-runner-v2-cudagraph-metrics-propa.patch
+aad042b2aa1ec79f9e043f58a6f86f500a4e4f72959c1162addf3a272f0a5d1b  0002-feat-emit-machine-readable-cudagraph-profile-metrics.patch
+89c8e9b5931b116f0e549e0307832ab025ddca8fa5086253cbfab61bbfd45fb3  0003-feat-add-lightweight-profile-guided-cudagraph-planne.patch
+0d0b933b655fe06886ea0f6a4d63609239e73f1df2435b438ab99d0de2845d35  0004-refactor-pg-cg-planner-capture-size.patch
+5337bd86dddcc46af74f947dd74f22660a08ee741c5d4d2851d397c3d1c3d32d  0005-experiment-pg-cg.patch

@@ -1,12 +1,18 @@
 From 71b6bd91b2029f65e628a7627be79ce3243b7b51 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Tue, 25 Aug 2026 00:08:28 +0800
-Subject: [PATCH 3/3] feat: add lightweight profile-guided cudagraph planner
+Subject: [PATCH 3/5] feat: add lightweight profile-guided cudagraph planner
 
+---
+ tests/benchmarks/test_pg_cg_lite.py | 121 +++++++++++++++++++
+ vllm/benchmarks/pg_cg_lite.py       | 175 ++++++++++++++++++++++++++++
+ 2 files changed, 296 insertions(+)
+ create mode 100644 tests/benchmarks/test_pg_cg_lite.py
+ create mode 100644 vllm/benchmarks/pg_cg_lite.py
 
 diff --git a/tests/benchmarks/test_pg_cg_lite.py b/tests/benchmarks/test_pg_cg_lite.py
 new file mode 100644
-index 0000000..030134f
+index 000000000..030134f22
 --- /dev/null
 +++ b/tests/benchmarks/test_pg_cg_lite.py
 @@ -0,0 +1,121 @@
@@ -133,7 +139,7 @@ index 0000000..030134f
 +    assert '"cudagraph_capture_sizes":[3,8]' in capsys.readouterr().out
 diff --git a/vllm/benchmarks/pg_cg_lite.py b/vllm/benchmarks/pg_cg_lite.py
 new file mode 100644
-index 0000000..824f7f1
+index 000000000..824f7f160
 --- /dev/null
 +++ b/vllm/benchmarks/pg_cg_lite.py
 @@ -0,0 +1,175 @@

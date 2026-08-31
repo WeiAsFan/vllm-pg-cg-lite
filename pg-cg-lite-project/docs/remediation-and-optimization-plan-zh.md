@@ -163,6 +163,7 @@ cost(p,j)=\sum_{c_p < x_i \le c_j}w_i(c_j-x_i)
 - [x] 将不存在的本机交付路径、旧 Windows 绝对路径和 `outputs/...` 引用改为仓库中的真实路径。
 - [x] 新增 `.gitattributes`，固定交付补丁和校验清单为 LF。
 - [x] 从 Git index 和当前 Windows 工作区分别计算补丁 SHA256。
+- [x] 重新生成五补丁交付系列，并从固定上游基线完成连续 `git am` 适用性验证。
 - [ ] 在 Linux checkout 再执行一次 `sha256sum --check`。
 - [x] 用路径扫描检查已修复的 Markdown 仓库相对文件引用。
 - [x] 明确模型 revision、vLLM commit、驱动、Torch/CUDA 与 benchmark 参数的记录位置。

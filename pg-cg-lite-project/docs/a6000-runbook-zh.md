@@ -22,11 +22,13 @@
 | A/B/C 次序 | `A1 → B1 → C1 → C2 → A2 → B2 → B3 → C3 → A3` |
 | PG-CG Lite | `K=8` |
 
-本项目的 3 个提交按职责拆分为：
+交付补丁中的 5 个提交按职责拆分为：
 
 1. 回移 vLLM PR #52750 的 Model Runner V2 指标传播修复；
 2. 增加 `PG_CG_PROFILE=` 机器可读日志；
-3. 增加标准库实现的离线动态规划器。
+3. 增加标准库实现的离线动态规划器；
+4. 将规划器约束为默认 capture-size 集合的子集；
+5. 增加同预算等秩基线及对应计划字段。
 
 ## 1. 先理解驱动结论
 
@@ -92,7 +94,7 @@ find "$PGCG_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' -print | sort
 (cd "$PGCG_PATCH_DIR" && sha256sum --check SHA256SUMS.txt)
 ```
 
-通过条件：输出恰好有 3 个按 `0001`、`0002`、`0003` 排序的补丁，随后 3 行校验均为 `OK`。若你的上传位置不同，只调整复制来源路径；不要改补丁内容。
+通过条件：输出恰好有 5 个按 `0001` 到 `0005` 排序的补丁，随后 5 行校验均为 `OK`。若你的上传位置不同，只调整复制来源路径；不要改补丁内容。
 
 ## 4. 记录服务器原始状态
 
@@ -147,14 +149,14 @@ cd "$PGCG_REPO"
 git switch -c feature/pg-cg-lite
 git am "$PGCG_PATCH_DIR"/*.patch
 
-git log --oneline --decorate -4
+git log --oneline --decorate -5
 git diff --name-only v0.27.1..HEAD
 git status --short
 ```
 
 通过条件：
 
-- 最上方 3 个提交信息依次涉及 planner、profile metrics、metrics propagation；
+- 最上方 5 个提交依次覆盖同预算基线、默认集合子集修复、planner、profile metrics 和 metrics propagation；
 - `git diff --name-only` 只显示以下 5 个路径：
 
 ```text

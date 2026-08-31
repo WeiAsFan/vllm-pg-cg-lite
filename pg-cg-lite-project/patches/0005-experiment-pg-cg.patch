@@ -1,0 +1,178 @@
+From d212d6a3d0aefa5c692ba46b4011c80d118916a8 Mon Sep 17 00:00:00 2001
+From: WeiAsFan <hxyzgkd168@mail.ustc.edu.cn>
+Date: Mon, 31 Aug 2026 08:39:33 +0800
+Subject: [PATCH 5/5] =?UTF-8?q?experiment(pg-cg):=20=E5=A2=9E=E5=8A=A0?=
+ =?UTF-8?q?=E5=90=8C=E9=A2=84=E7=AE=97=E5=9F=BA=E7=BA=BF=E4=B8=8E=E5=86=BB?=
+ =?UTF-8?q?=E7=BB=93=E5=AE=9E=E9=AA=8C=E5=8D=8F=E8=AE=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+增加不读取画像的等秩默认子集，并让计划同时输出 B、C 两组配置。将远端实验冻结为 A/B/C 三组交叉顺序，补充 time-to-ready、p95 延迟、K 敏感性和轻量 shift 检查。
+
+验证：按执行环境约束未在本机运行测试；仅完成代码静态审阅、术语扫描和 Git 差异检查，测试待 Linux 服务器执行。
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+Signed-off-by: WeiAsFan <hxyzgkd168@mail.ustc.edu.cn>
+---
+ tests/benchmarks/test_pg_cg_lite.py | 25 ++++++++++++++
+ vllm/benchmarks/pg_cg_lite.py       | 53 +++++++++++++++++++++++++----
+ 2 files changed, 71 insertions(+), 7 deletions(-)
+
+diff --git a/tests/benchmarks/test_pg_cg_lite.py b/tests/benchmarks/test_pg_cg_lite.py
+index c74e5ff9c..a9719619e 100644
+--- a/tests/benchmarks/test_pg_cg_lite.py
++++ b/tests/benchmarks/test_pg_cg_lite.py
+@@ -14,6 +14,7 @@ from vllm.benchmarks.pg_cg_lite import (
+     parse_profile_lines,
+     predict_padding,
+     select_capture_sizes,
++    select_uniform_rank_subset,
+ )
+ 
+ SIZES = [1, 2, 4, 8]
+@@ -107,6 +108,21 @@ def test_budget_covering_all_used_default_sizes_keeps_them() -> None:
+     assert select_capture_sizes({size: 1 for size in SIZES}, 8, SIZES) == tuple(SIZES)
+ 
+ 
++@pytest.mark.parametrize(
++    ("size_count", "expected"),
++    [(1, (8,)), (2, (1, 8)), (3, (1, 4, 8)), (8, (1, 2, 4, 8))],
++)
++def test_uniform_rank_subset_is_deterministic_and_preserves_maximum(
++    size_count: int, expected: tuple[int, ...]
++) -> None:
++    assert select_uniform_rank_subset(SIZES, size_count) == expected
++
++
++def test_uniform_rank_subset_rejects_zero_budget() -> None:
++    with pytest.raises(ValueError, match="size_count"):
++        select_uniform_rank_subset(SIZES, 0)
++
++
+ @pytest.mark.parametrize(
+     "source_sizes",
+     [[], [1, 4, 2, 8], [1, 2, 2, 8], [0, 1, 2, 8]],
+@@ -139,6 +155,15 @@ def test_build_plan_is_directly_applicable() -> None:
+     assert plan["selection_policy"] == "default_capture_size_subset_dp"
+     assert plan["max_capture_sizes"] == 2
+     assert plan["source_capture_sizes"] == SIZES
++    assert plan["equal_budget_selection_policy"] == "uniform_rank_default_subset"
++    assert plan["equal_budget_capture_sizes"] == [1, 8]
++    assert (
++        plan["equal_budget_capture_size_count"]
++        == plan["selected_capture_size_count"]
++    )
++    assert plan["equal_budget_compilation_config"] == {
++        "cudagraph_capture_sizes": plan["equal_budget_capture_sizes"]
++    }
+     assert plan["compilation_config"] == {
+         "cudagraph_capture_sizes": plan["selected_capture_sizes"]
+     }
+diff --git a/vllm/benchmarks/pg_cg_lite.py b/vllm/benchmarks/pg_cg_lite.py
+index 32c20ae3e..628da2f60 100644
+--- a/vllm/benchmarks/pg_cg_lite.py
++++ b/vllm/benchmarks/pg_cg_lite.py
+@@ -83,6 +83,17 @@ def predict_padding(histogram: Mapping[int, int], capture_sizes: Sequence[int])
+     return total
+ 
+ 
++def _normalize_source_sizes(source_capture_sizes: Sequence[int]) -> tuple[int, ...]:
++    source_sizes = tuple(source_capture_sizes)
++    if (
++        not source_sizes
++        or source_sizes != tuple(sorted(set(source_sizes)))
++        or source_sizes[0] <= 0
++    ):
++        raise ValueError("source_capture_sizes must be sorted positive integers")
++    return source_sizes
++
++
+ def select_capture_sizes(
+     histogram: Mapping[int, int],
+     max_sizes: int,
+@@ -93,13 +104,7 @@ def select_capture_sizes(
+     if any(token_count <= 0 or count <= 0 for token_count, count in histogram.items()):
+         raise ValueError("histogram keys and counts must be positive")
+ 
+-    source_sizes = tuple(source_capture_sizes)
+-    if (
+-        not source_sizes
+-        or source_sizes != tuple(sorted(set(source_sizes)))
+-        or source_sizes[0] <= 0
+-    ):
+-        raise ValueError("source_capture_sizes must be sorted positive integers")
++    source_sizes = _normalize_source_sizes(source_capture_sizes)
+     if max(histogram) > source_sizes[-1]:
+         raise ValueError("source capture-size maximum must cover the histogram")
+ 
+@@ -149,18 +154,42 @@ def select_capture_sizes(
+     return result[1]
+ 
+ 
++def select_uniform_rank_subset(
++    source_capture_sizes: Sequence[int], size_count: int
++) -> tuple[int, ...]:
++    if size_count < 1:
++        raise ValueError("size_count must be positive")
++    source_sizes = _normalize_source_sizes(source_capture_sizes)
++    selected_count = min(size_count, len(source_sizes))
++    if selected_count == 1:
++        return (source_sizes[-1],)
++
++    denominator = selected_count - 1
++    indexes = (
++        (index * (len(source_sizes) - 1) + denominator // 2) // denominator
++        for index in range(selected_count)
++    )
++    return tuple(source_sizes[index] for index in indexes)
++
++
+ def build_plan(profile: Profile, max_sizes: int) -> dict[str, object]:
+     selected = select_capture_sizes(
+         profile.histogram, max_sizes, profile.source_capture_sizes
+     )
++    equal_budget = select_uniform_rank_subset(
++        profile.source_capture_sizes, len(selected)
++    )
+     return {
+         "selection_policy": "default_capture_size_subset_dp",
++        "equal_budget_selection_policy": "uniform_rank_default_subset",
+         "max_capture_sizes": max_sizes,
+         "source_capture_sizes": list(profile.source_capture_sizes),
++        "equal_budget_capture_sizes": list(equal_budget),
+         "selected_capture_sizes": list(selected),
+         "profile_event_count": sum(profile.histogram.values()),
+         "none_event_count": profile.none_event_count,
+         "baseline_capture_size_count": len(profile.source_capture_sizes),
++        "equal_budget_capture_size_count": len(equal_budget),
+         "selected_capture_size_count": len(selected),
+         "baseline_predicted_padding_tokens": predict_padding(
+             profile.histogram, profile.source_capture_sizes
+@@ -168,6 +197,12 @@ def build_plan(profile: Profile, max_sizes: int) -> dict[str, object]:
+         "selected_predicted_padding_tokens": predict_padding(
+             profile.histogram, selected
+         ),
++        "equal_budget_predicted_padding_tokens": predict_padding(
++            profile.histogram, equal_budget
++        ),
++        "equal_budget_compilation_config": {
++            "cudagraph_capture_sizes": list(equal_budget)
++        },
+         "compilation_config": {"cudagraph_capture_sizes": list(selected)},
+     }
+ 
+@@ -192,6 +227,10 @@ def main(argv: Sequence[str] | None = None) -> int:
+         f"predicted padding tokens: {plan['baseline_predicted_padding_tokens']} -> "
+         f"{plan['selected_predicted_padding_tokens']}"
+     )
++    print(
++        "equal-budget predicted padding tokens: "
++        f"{plan['equal_budget_predicted_padding_tokens']}"
++    )
+     print(json.dumps(plan["compilation_config"], separators=(",", ":")))
+     return 0
+ 
+-- 
+2.48.1.windows.1
+
