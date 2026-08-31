@@ -201,7 +201,7 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 本任务不再修改源码。完整命令、停止条件、函数和结果脚本见：
 
-`outputs/PG-CG-Lite-A6000完整操作手册.md`
+[A6000 完整操作手册](a6000-runbook-zh.md)
 
 固定条件：
 

@@ -57,7 +57,7 @@ set -euo pipefail
 
 export PGCG_ROOT="$PWD/pg-cg-lite-work"
 export PGCG_REPO="$PGCG_ROOT/vllm"
-export PGCG_PATCH_DIR="$PGCG_ROOT/pg-cg-lite-patches"
+export PGCG_PATCH_DIR="$PGCG_ROOT/patches"
 export PGCG_LOG_DIR="$PGCG_ROOT/logs"
 export PGCG_MODEL_DIR="$PGCG_ROOT/models/Qwen2.5-7B-Instruct"
 export PGCG_PORT=8000
@@ -73,11 +73,12 @@ mkdir -p "$PGCG_ROOT" "$PGCG_LOG_DIR" "$PGCG_ROOT/models" "$PGCG_ROOT/wheels"
 
 ## 3. 从当前电脑把补丁复制到服务器
 
-本项目交付目录中有 `pg-cg-lite-patches` 文件夹。Windows PowerShell 中执行下面命令，只替换 `你的用户名` 和 `服务器地址`：
+当前仓库的 `pg-cg-lite-project/patches` 目录中包含交付补丁。先在 Windows PowerShell 中切换到仓库根目录，再执行下面命令；只替换 `你的用户名` 和 `服务器地址`：
 
 ```powershell
-scp -r "C:\Users\ABC\Documents\Codex\2026-08-21\wo-x\outputs\pg-cg-lite-patches" `
-  你的用户名@服务器地址:~/
+$PGCG_LOCAL_PATCH_DIR = (Resolve-Path ".\pg-cg-lite-project\patches").Path
+scp -r "$PGCG_LOCAL_PATCH_DIR" `
+  你的用户名@服务器地址:~/pg-cg-lite-patches
 ```
 
 回到服务器，执行：
@@ -451,6 +452,7 @@ pgcg_correctness_bench() {
   "$PGCG_REPO/.venv/bin/vllm" bench serve \
     --backend vllm \
     --model pg-cg-qwen \
+    --tokenizer "$PGCG_MODEL" \
     --host 127.0.0.1 \
     --port "$PGCG_PORT" \
     --endpoint /v1/completions \
@@ -474,6 +476,7 @@ pgcg_perf_bench() {
   "$PGCG_REPO/.venv/bin/vllm" bench serve \
     --backend vllm \
     --model pg-cg-qwen \
+    --tokenizer "$PGCG_MODEL" \
     --host 127.0.0.1 \
     --port "$PGCG_PORT" \
     --endpoint /v1/completions \
@@ -538,6 +541,7 @@ pgcg_start_server profile "" 1
 "$PGCG_REPO/.venv/bin/vllm" bench serve \
   --backend vllm \
   --model pg-cg-qwen \
+  --tokenizer "$PGCG_MODEL" \
   --host 127.0.0.1 \
   --port "$PGCG_PORT" \
   --endpoint /v1/completions \
@@ -905,8 +909,10 @@ ls -lh "$PGCG_LOG_DIR/capture-comparison.png"
 把整个日志目录复制回当前电脑：
 
 ```powershell
-scp -r 你的用户名@服务器地址:服务器上的绝对路径/pg-cg-lite-work/logs `
-  "C:\Users\ABC\Documents\Codex\2026-08-21\wo-x\outputs\pg-cg-lite-server-results"
+$PGCG_LOCAL_RESULTS_DIR = Join-Path (Get-Location) "pg-cg-lite-server-results"
+New-Item -ItemType Directory -Force -Path "$PGCG_LOCAL_RESULTS_DIR" | Out-Null
+scp -r 你的用户名@服务器地址:服务器上的绝对路径/pg-cg-lite-work/logs/. `
+  "$PGCG_LOCAL_RESULTS_DIR"
 ```
 
 至少应包含：
