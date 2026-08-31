@@ -1,10 +1,10 @@
-# PG-CG Lite 逐文件实现计划（已执行）
+# PG-CG Lite 逐文件实现记录与待验证项
 
 ## 1. 目标与状态
 
-**目标：** 在 vLLM v0.27.1 中补齐 CUDA Graph 真实运行画像，增加一个离线动态规划器，从固定 workload 的日志中选择最多 8 个 capture sizes，并在单卡 A6000 上用简单 A/B 实验验证启动开销与稳态性能。
+**目标：** 在 vLLM v0.27.1 中补齐 CUDA Graph 真实运行画像，增加一个离线动态规划器，从默认 capture-size 集合中选择最多 8 个尺寸，并在单卡 A6000 上验证初始化开销与稳态性能。
 
-**当前状态：** CPU 可完成的代码、测试、格式检查和交付补丁已经完成；真实 GPU 门禁和 A/B 数据必须等服务器可访问后执行。
+**当前状态：** 核心规划器已改为默认集合子集剪枝；按照执行环境约束，本机不运行测试，planner、日志链路、GPU 门禁和性能实验统一留到 SSH 登录的 Linux 服务器执行。
 
 **源码基线：**
 
@@ -137,7 +137,7 @@ PG_CG_PROFILE={...}
 
 ### 选择算法
 
-给定真实 token 数量直方图 `(x_i, w_i)` 和最多图数量 `K`，选择升序端点集合 `S`，最小化：
+给定真实 token 数量直方图 `(x_i, w_i)`、默认 capture-size 集合 `C` 和尺寸预算 `K`，选择升序端点集合 `S`，最小化：
 
 \[
 L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
@@ -146,15 +146,16 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 约束：
 
 - 默认 `K=8`；
-- 端点来自观测尺寸和原最大 capture size；
+- `S ⊆ C`，不生成默认集合之外的新尺寸；
+- `1 <= |S| <= K`；
 - 必须保留原最大 capture size，不缩小覆盖上界；
-- 相同代价使用字典序更小的 tuple，输出完全确定。
+- 相同 padding 先选择尺寸更少的集合，再使用字典序更小的 tuple。
 
-实现使用连续区间动态规划与前缀和：
+实现使用默认候选上的连续区间动态规划与画像前缀和：
 
-- 时间复杂度 `O(Kn²)`；
-- 空间复杂度 `O(Kn)`；
-- 画像规模只有几十到几百个点，不需要更复杂算法。
+- 时间复杂度 `O(Km² log n)`，其中 `m=|C|`、`n` 为画像需求点数量；
+- 空间复杂度 `O(Km)`；
+- 默认集合只有几十个尺寸，不需要更复杂算法。
 
 ### 输出
 
@@ -163,13 +164,14 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 ```bash
 .venv/bin/python -m vllm.benchmarks.pg_cg_lite \
   --log logs/profile-server.log \
-  --max-graphs 8 \
+  --max-sizes 8 \
   --output logs/plan.json
 ```
 
 `plan.json` 同时包含：
 
 - 默认与候选 capture-size 数量；
+- `selection_policy`、尺寸预算和完整默认尺寸列表；
 - 默认与候选预测 padding token 数；
 - profile 和 NONE 事件数；
 - `selected_capture_sizes`；
@@ -179,23 +181,24 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 `tests/benchmarks/test_pg_cg_lite.py`
 
-### 7 个测试
+### 15 个测试用例
 
 1. 多日志周期合并，FULL/PIECEWISE 归一，NONE 单独计数；
-2. 手算样例 `{1:5, 3:3, 8:2}`、`K=2` 得到 `(3, 8)`，padding 为 10；
-3. 固定随机种子的 50 组小实例与穷举最优解完全一致；
-4. 空日志报错；
-5. 混合不同 capture 配置报错；
-6. 计划中的配置可直接应用；
-7. CLI 写出计划文件并打印紧凑配置。
+2. 默认 `[1,2,4,8]`、画像 `{1:5, 3:3, 8:2}`、`K=2` 得到合法子集 `(1,8)`，padding 为 15；
+3. 固定随机种子的 50 组小实例与所有合法默认子集的穷举最优解完全一致；
+4. 结果属于默认集合、保留最大值且不超过预算；
+5. 等 padding 时优先更少尺寸，预算足够且每个默认尺寸均命中时保留全集；
+6. 空、乱序、重复、非正默认集合以及超出最大覆盖的画像均报错；
+7. 空日志和混合不同 capture 配置报错；
+8. 计划字段、可应用配置和新 CLI 参数保持一致。
 
-### 完成证据
+### 服务器待验证门禁
 
-- 7/7 测试通过；
 - 规划器不导入 torch，不增加运行依赖；
-- Ruff、格式、编译和 diff 检查通过；
-- 生产文件约 175 行、测试约 121 行；
-- 独立提交：`feat: add lightweight profile-guided cudagraph planner`。
+- 在 Linux 项目环境运行全部 15 个 planner 测试；
+- 在同一环境运行画像日志测试、Ruff、格式、编译和 diff 检查；
+- GPU 冒烟确认真实日志满足子集规划输入契约；
+- 子集修复提交：`5f4c5a241 refactor(pg-cg): 将 planner 约束为默认 capture-size 子集`。
 
 ## 7. 任务四：A6000 验证
 
@@ -223,7 +226,7 @@ L(S)=\sum_i w_i\left(\min\{s\in S\mid s\ge x_i\}-x_i\right)
 
 1. 普通 CUDA matmul；
 2. `torch.compile`/Triton JIT；
-3. 2+7 个聚焦测试和 Ruff；
+3. 2+15 个聚焦测试和 Ruff；
 4. vLLM CUDA Graph 服务冒烟；
 5. 非空 `PG_CG_PROFILE=`；
 6. 计划默认尺寸数大于 8、候选不超过 8；

@@ -282,7 +282,7 @@ PY
   tests/benchmarks/test_pg_cg_lite.py
 ```
 
-预期分别是 2 个测试通过、7 个测试通过、两个 Ruff 命令通过。
+预期分别是 2 个测试通过、15 个测试通过、两个 Ruff 命令通过。
 
 ### 8.4 任一 CUDA 门禁失败时怎么做
 
@@ -580,7 +580,7 @@ cd "$PGCG_REPO"
 
 .venv/bin/python -m vllm.benchmarks.pg_cg_lite \
   --log "$PGCG_LOG_DIR/profile-server.log" \
-  --max-graphs 8 \
+  --max-sizes 8 \
   --output "$PGCG_LOG_DIR/plan.json"
 
 .venv/bin/python -m json.tool "$PGCG_LOG_DIR/plan.json"
@@ -608,11 +608,17 @@ import sys
 
 plan = json.load(open(sys.argv[1], encoding="utf-8"))
 sizes = plan["selected_capture_sizes"]
+source_sizes = plan["source_capture_sizes"]
+assert plan["selection_policy"] == "default_capture_size_subset_dp"
+assert plan["max_capture_sizes"] == 8
 assert 1 <= len(sizes) <= 8
 assert sizes == sorted(set(sizes))
-assert sizes[-1] == plan["compilation_config"]["cudagraph_capture_sizes"][-1]
+assert set(sizes) <= set(source_sizes)
+assert sizes[-1] == source_sizes[-1]
+assert sizes == plan["compilation_config"]["cudagraph_capture_sizes"]
 assert plan["baseline_capture_size_count"] > 8, plan
-assert plan["selected_capture_size_count"] <= 8, plan
+assert plan["baseline_capture_size_count"] == len(source_sizes), plan
+assert plan["selected_capture_size_count"] == len(sizes), plan
 assert plan["baseline_predicted_padding_tokens"] >= 0
 assert plan["selected_predicted_padding_tokens"] >= 0
 print("计划门禁通过：", plan["baseline_capture_size_count"], "->", len(sizes))
@@ -940,7 +946,7 @@ capture-comparison.png
 
 1. vLLM 默认按规则捕获一组 CUDA Graph sizes，但不知道业务的真实 scheduled-token 分布。
 2. 我补齐了 Model Runner V2 的指标传播，并让现有低频日志输出机器可读直方图。
-3. 离线规划器用 `O(Kn²)` 动态规划，在保留原最大覆盖上界的前提下，选择最多 8 个尺寸，使画像上的预测 padding 最小。
+3. 离线规划器只在默认 capture-size 集合中做精确子集搜索；当前 DP 为 `O(Km² log n)`，保留原最大覆盖上界并最小化画像上的预测 padding。
 4. 在线热路径没有增加搜索，也没有修改 scheduler、kernel 或配置协议。
 5. 我用单卡 A6000、同一模型快照、同一 workload 做默认与 Lite 各 3 次交替实验，比较 capture 时间、capture 显存、吞吐和 TPOT，并做 20 条输出一致性检查。
 6. 结论只对该画像 workload 负责；流量分布变化后需要重新画像。

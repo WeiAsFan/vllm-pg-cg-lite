@@ -2,9 +2,9 @@
 
 | 文档属性 | 值 |
 |---|---|
-| 状态 | 已确认范围，可进入实现 |
-| 版本 | 2.0 Lite |
-| 日期 | 2026-08-25 |
+| 状态 | 核心规划器已切换为默认集合子集剪枝；Linux/A6000 验证待执行 |
+| 版本 | 2.1 Lite |
+| 日期 | 2026-08-31 |
 | 目标框架 | vLLM |
 | 开发基线 | `v0.27.1` / `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` |
 | 验证硬件 | 单卡 NVIDIA RTX A6000 48 GiB，`sm_86` |
@@ -184,15 +184,20 @@ PG_CG_PROFILE={"bins":[...],"capture_sizes":[...],"cudagraph_mode":"...","schema
 (x_i,w_i),\quad 0 < x_1 < x_2 < \dots < x_n
 \]
 
-其中 (x_i) 是真实 `num_unpadded_tokens`，(w_i) 是出现次数。`NONE` 事件只计数并报告，不参与尺寸选择，因为它不一定由 capture-size 上界导致。
+其中 (x_i) 是真实 `num_unpadded_tokens`，(w_i) 是出现次数。画像还必须提供 vLLM 本次实际解析的默认集合：
+
+\[
+C=(c_1<c_2<\dots<c_m),\qquad M=c_m
+\]
+
+`NONE` 事件只计数并报告，不参与尺寸选择，因为它不一定由 capture-size 上界导致。
 
 ### 8.2 约束
 
 - 默认 `K=8`；
-- 选择结果最多包含 K 个尺寸；
-- 保留默认 capture set 的最大尺寸 `M`，避免主动缩小已配置的可捕获上界；
-- 其他候选端点来自观测到的 `x_i`；
-- 若不同候选不足 K 个，就全部保留。
+- 结果必须满足 `S ⊆ C`，不能生成默认集合之外的新尺寸；
+- `1 <= |S| <= K`；
+- 必须保留默认集合的最大尺寸 `M`，避免主动缩小已配置的可捕获上界。
 
 ### 8.3 目标函数
 
@@ -208,19 +213,19 @@ g_S(x)=\min\{s\in S\mid s\ge x\}
 L(S)=\sum_i w_i(g_S(x_i)-x_i)
 \]
 
-算法选择满足约束且 (L(S)) 最小的集合。该值只是可解释的 padding 代理指标，不是 GPU 延迟预测公式。
+算法选择满足约束且 (L(S)) 最小的集合。代价相同时先选择尺寸更少的集合，再选择字典序更小的尺寸 tuple。该值只是可解释的 padding 代理指标，不是 GPU 延迟预测公式。
 
 ### 8.4 动态规划
 
-有序需求点会被划分为 K 个连续区间，每个区间映射到该区间的右端点；最后一个右端点固定为 `M`。区间 `i..j` 映射到 `x_j` 时：
+候选端点只遍历默认集合 `C`。若前一个端点为 `c_p`、当前端点为 `c_j`，当前端点新增覆盖的画像需求满足 `c_p < x_i <= c_j`，区间代价为：
 
 \[
-C(i,j)=\sum_{t=i}^{j}w_t(x_j-x_t)
+cost(p,j)=\sum_{c_p<x_i\le c_j}w_i(c_j-x_i)
 \]
 
-用计数前缀和与加权 token 前缀和可 O(1) 计算区间代价。简单动态规划的时间复杂度是 O((Kn^2))，空间复杂度是 O((Kn))。对本项目几十到几百个尺寸的画像足够快。
+首个端点使用负无穷哨兵。动态规划状态记录“使用指定数量的默认端点、最后停在 `c_j`”时的最小 padding 与端点 tuple；最终只比较以 `M` 结尾、尺寸数量为 `1..min(K,m)` 的状态。
 
-代价相同时选择字典序更小的尺寸 tuple，保证结果确定。测试使用 `n <= 8` 的随机小直方图与穷举结果对照。
+对 `m` 个默认候选和 `n` 个画像需求点，当前直接实现的时间复杂度为 `O(Km² log n)`，空间复杂度为 `O(Km)`。默认集合只有几十个尺寸，该实现足够小且容易与穷举结果对拍。
 
 ### 8.5 输出
 
@@ -228,19 +233,23 @@ C(i,j)=\sum_{t=i}^{j}w_t(x_j-x_t)
 
 ```json
 {
-  "max_graphs": 8,
-  "selected_capture_sizes": [4, 8, 16, 24, 32, 64, 128, 256],
-  "profile_event_count": 28491,
+  "selection_policy": "default_capture_size_subset_dp",
+  "max_capture_sizes": 2,
+  "source_capture_sizes": [1, 2, 4, 8],
+  "selected_capture_sizes": [1, 8],
+  "profile_event_count": 10,
   "none_event_count": 0,
-  "baseline_capture_size_count": 35,
-  "selected_capture_size_count": 8,
-  "baseline_predicted_padding_tokens": 11520,
-  "selected_predicted_padding_tokens": 18942,
+  "baseline_capture_size_count": 4,
+  "selected_capture_size_count": 2,
+  "baseline_predicted_padding_tokens": 3,
+  "selected_predicted_padding_tokens": 15,
   "compilation_config": {
-    "cudagraph_capture_sizes": [4, 8, 16, 24, 32, 64, 128, 256]
+    "cudagraph_capture_sizes": [1, 8]
   }
 }
 ```
+
+这是用于解释字段的最小示例；正式运行仍使用默认 `K=8`，尺寸必须由服务器画像生成。
 
 用户只需复制 `compilation_config` 到已有 `--compilation-config`，不需要新增 vLLM CLI。
 
@@ -296,7 +305,7 @@ vllm bench serve \
 ```bash
 .venv/bin/python -m vllm.benchmarks.pg_cg_lite \
   --log logs/profile-server.log \
-  --max-graphs 8 \
+  --max-sizes 8 \
   --output logs/pg-cg-plan.json
 ```
 
@@ -315,7 +324,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
   2>&1 | tee logs/lite-run-1-server.log
 ```
 
-示例尺寸只能由本机画像生成，不允许直接照抄文档中的数字。
+示例尺寸只能由当前 Linux 服务器的真实画像生成，不允许直接照抄文档中的数字。
 
 ## 11. A6000 最小验证方案
 
